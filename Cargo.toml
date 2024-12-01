@@ -1,0 +1,15 @@
+[package]
+name = "parquet-playground-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arrow = "53.3.0"
+chrono = "0.4.38"
+clap = { version = "4", features = ["derive"] }
+parquet = "53.3.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1"}
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber= { version = "0.3", features = ["env-filter"] }
