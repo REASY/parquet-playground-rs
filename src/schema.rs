@@ -8,10 +8,10 @@ pub struct ThisSchema {
 
 impl ThisSchema {
     fn f64_list() -> DataType {
-        DataType::List(Arc::new(Field::new("item", DataType::Float64, true)))
+        DataType::List(Arc::new(Field::new_list_field(DataType::Float64, true)))
     }
     fn i64_list() -> DataType {
-        DataType::List(Arc::new(Field::new("item", DataType::Int64, true)))
+        DataType::List(Arc::new(Field::new_list_field(DataType::Int64, true)))
     }
 
     fn ts_field() -> Field {

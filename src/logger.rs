@@ -1,7 +1,7 @@
 use std::env;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt::SubscriberBuilder;
 use tracing_subscriber::fmt::format::{DefaultFields, Format};
+use tracing_subscriber::fmt::SubscriberBuilder;
+use tracing_subscriber::EnvFilter;
 
 pub fn setup(log_level: &str) {
     if env::var_os("RUST_LOG").is_none() {

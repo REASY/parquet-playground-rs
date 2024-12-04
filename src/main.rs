@@ -8,10 +8,12 @@ use crate::columns_builder::{Builders, ColumnsBuilder};
 use crate::errors::AppError;
 use crate::model::Metric;
 use clap::{Parser, ValueEnum};
-use parquet::arrow::ArrowWriter;
+use flate2::read::GzDecoder;
 use parquet::arrow::arrow_writer::ArrowWriterOptions;
-use parquet::basic::{Compression, ZstdLevel};
+use parquet::arrow::ArrowWriter;
+use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::properties::{EnabledStatistics, WriterProperties, WriterVersion};
+use parquet::schema::types::ColumnPath;
 use serde_json::from_slice;
 use std::collections::HashSet;
 use std::io::Read;
@@ -80,10 +82,19 @@ fn main() -> errors::Result<()> {
     };
     let file = std::fs::File::create(args.output_parquet_file_path)?;
     let compression = Compression::ZSTD(ZstdLevel::try_new(3)?);
+    let sums_double_col = get_list_column_path("sums_double");
+    let sums_long_col = get_list_column_path("sums_long");
+    let count_col = get_list_column_path("count");
     let props = WriterProperties::builder()
         .set_statistics_enabled(enabled_statistics)
+        // Not much benefit on having status on sums and count, disable it
+        .set_column_statistics_enabled(sums_double_col.clone(), EnabledStatistics::None)
+        .set_column_statistics_enabled(sums_long_col, EnabledStatistics::None)
+        .set_column_statistics_enabled(count_col, EnabledStatistics::None)
         .set_compression(compression)
         .set_dictionary_enabled(true)
+        // We want to use BYTE_STREAM_SPLIT for doubles
+        .set_column_encoding(sums_double_col, Encoding::BYTE_STREAM_SPLIT)
         .set_writer_version(WriterVersion::PARQUET_2_0)
         .build();
     let wrt_opts = ArrowWriterOptions::new()
@@ -104,11 +115,25 @@ fn main() -> errors::Result<()> {
     Ok(())
 }
 
+fn get_list_column_path(column: &str) -> ColumnPath {
+    ColumnPath::from(vec![
+        column.to_owned(),
+        "list".to_owned(),
+        "item".to_owned(),
+    ])
+}
+
 fn read_metric(path: &str) -> Result<Metric, AppError> {
     let metric = {
         let mut bytes = Vec::new();
         let mut f = std::fs::File::open(path)?;
         f.read_to_end(&mut bytes)?;
+        if path.ends_with(".gz") {
+            let mut decoder = GzDecoder::new(bytes.as_slice());
+            let mut uncompressed = Vec::new();
+            decoder.read_to_end(&mut uncompressed)?;
+            bytes = uncompressed;
+        }
         from_slice::<Metric>(&bytes)?
     };
     Ok(metric)

@@ -120,8 +120,8 @@ impl Builders {
         builder.append_value(vals);
     }
 
-    fn append_to_f64(values: &[f64], builder: &mut ListBuilder<Float64Builder>) {
-        let vals: Vec<Option<f64>> = values.iter().map(|x| Some(*x)).collect();
+    fn append_to_f64(values: &[Option<f64>], builder: &mut ListBuilder<Float64Builder>) {
+        let vals: Vec<Option<f64>> = values.iter().map(|x| x.to_owned()).collect();
         builder.append_value(vals);
     }
 

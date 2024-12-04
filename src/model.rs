@@ -5,7 +5,7 @@ pub struct Series {
     pub tag_values: Vec<String>,
     pub ts: Vec<i64>,
     #[serde(rename = "sumsDouble")]
-    pub sums_double: Vec<f64>,
+    pub sums_double: Vec<Option<f64>>,
     #[serde(rename = "sumsLong")]
     pub sums_long: Vec<i64>,
     pub count: Vec<i64>,
@@ -14,8 +14,5 @@ pub struct Series {
 #[derive(serde::Deserialize, Debug)]
 pub struct Metric {
     pub metric: String,
-    #[serde(rename = "measurementType")]
-    #[allow(unused)]
-    pub measurement_type: u8,
     pub series: Vec<Series>,
 }
