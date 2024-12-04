@@ -7,14 +7,14 @@ pub struct AppError(Box<ErrorKind>);
 #[derive(Error, Debug)]
 #[error(transparent)]
 pub enum ErrorKind {
-    #[error("SerdeJsonError: {0}")]
-    SerdeJsonError(#[from] serde_json::Error),
-    #[error("IoError: {0}")]
-    IoError(#[from] std::io::Error),
-    #[error("ArrowError: {0}")]
-    ArrowError(#[from] arrow::error::ArrowError),
-    #[error("ParquetError: {0}")]
-    ParquetError(#[from] parquet::errors::ParquetError),
+    #[error("SerdeJson: {0}")]
+    SerdeJson(#[from] serde_json::Error),
+    #[error("Io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Arrow: {0}")]
+    Arrow(#[from] arrow::error::ArrowError),
+    #[error("Parquet: {0}")]
+    Parquet(#[from] parquet::errors::ParquetError),
 }
 
 impl<E> From<E> for AppError

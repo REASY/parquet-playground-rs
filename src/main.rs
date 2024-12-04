@@ -56,12 +56,12 @@ fn main() -> errors::Result<()> {
         let mut all_tags: HashSet<&str> = HashSet::new();
         metric.series.iter().for_each(|s| {
             s.tags.iter().for_each(|t| {
-                all_tags.insert(&t);
+                all_tags.insert(t.as_str());
             });
         });
-        let mut xs: Vec<&str> = all_tags.iter().map(|x| *x).collect();
+        let mut xs: Vec<&str> = all_tags.iter().copied().collect();
         xs.sort();
-        xs.iter().map(|c| Builders::as_hex(*c)).collect()
+        xs.iter().map(|c| Builders::as_hex(c)).collect()
     };
     info!(
         "`{}` with {} series, total number of tags: {}",
@@ -72,7 +72,7 @@ fn main() -> errors::Result<()> {
     let mut builders = Builders::new(all_tags.as_slice());
     let schema = builders.schema.clone();
     for s in &metric.series {
-        builders.append(&s)?;
+        builders.append(s)?;
     }
 
     let enabled_statistics = match &args.statistics_mode {

@@ -52,14 +52,13 @@ impl<'a> ColumnsBuilder<'a> for Builders {
         let mut i: usize = 0;
         while i < msg.tags.len() {
             let tag_hex = {
-                let tag: &str = &msg.tags[i].as_ref();
+                let tag: &str = msg.tags[i].as_ref();
                 Self::as_hex(tag)
             };
             let tag_value: String = msg.tag_values[i].clone();
-            let str_builder = self
-                .hex_tag_fields
-                .get_mut(tag_hex.as_str())
-                .expect(format!("Could not find tag {}", tag_hex).as_str());
+            let str_builder = self.hex_tag_fields.get_mut(tag_hex.as_str()).ok_or(
+                ArrowError::InvalidArgumentError(format!("Could not find tag {}", tag_hex)),
+            )?;
             str_builder.append_value(tag_value);
 
             used_buffers.insert(tag_hex);
@@ -107,7 +106,7 @@ impl Builders {
             .collect();
         Builders {
             schema: Arc::new(schema),
-            hex_tag_fields: hex_tag_fields,
+            hex_tag_fields,
             ts: ListBuilder::new(Int64Builder::new()),
             sums_double: ListBuilder::new(Float64Builder::new()),
             sums_long: ListBuilder::new(Int64Builder::new()),
