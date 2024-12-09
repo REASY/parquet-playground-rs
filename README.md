@@ -12,9 +12,9 @@ The project requires the following tools configured on your developer machine:
 In the root folder of the repository run the following
 
 ```bash
-cargo build --release && target/release/parquet-playground-rs --help
+cargo build --release && target/release/js2pq --help
     Finished `release` profile [optimized] target(s) in 0.11s
-Usage: parquet-playground-rs.exe --input-json-file-path <INPUT_JSON_FILE_PATH> --output-parquet-file-path <OUTPUT_PARQUET_FILE_PATH> --statistics-mode <STATISTICS_MODE>
+Usage: js2pq.exe --input-json-file-path <INPUT_JSON_FILE_PATH> --output-parquet-file-path <OUTPUT_PARQUET_FILE_PATH> --statistics-mode <STATISTICS_MODE>
 
 Options:
       --input-json-file-path <INPUT_JSON_FILE_PATH>

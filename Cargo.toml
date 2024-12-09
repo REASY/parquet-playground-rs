@@ -1,13 +1,23 @@
 [package]
 name = "parquet-playground-rs"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
+
+[[bin]]
+name = "js2pq"
+path = "src/bin/js2pq/main.rs"
+
+[[bin]]
+name = "parqbench"
+path = "src/bin/parqbench/main.rs"
 
 [dependencies]
 arrow = "53.3.0"
 chrono = "0.4.38"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
 parquet = "53.3.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1"}

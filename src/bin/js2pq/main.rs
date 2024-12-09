@@ -1,12 +1,3 @@
-mod columns_builder;
-mod errors;
-mod logger;
-pub mod model;
-mod schema;
-
-use crate::columns_builder::{Builders, ColumnsBuilder};
-use crate::errors::AppError;
-use crate::model::Metric;
 use clap::{Parser, ValueEnum};
 use flate2::read::GzDecoder;
 use parquet::arrow::arrow_writer::ArrowWriterOptions;
@@ -14,6 +5,10 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::properties::{EnabledStatistics, WriterProperties, WriterVersion};
 use parquet::schema::types::ColumnPath;
+use parquet_playground_rs::columns_builder::{Builders, ColumnsBuilder};
+use parquet_playground_rs::errors::AppError;
+use parquet_playground_rs::model::Metric;
+use parquet_playground_rs::{errors, logger};
 use serde_json::from_slice;
 use std::collections::HashSet;
 use std::io::Read;
@@ -46,7 +41,7 @@ struct AppArgs {
 
 fn main() -> errors::Result<()> {
     let t: Instant = Instant::now();
-    logger::setup("INFO");
+    logger::setup("js2pq", "INFO");
 
     let args = AppArgs::parse();
     info!("Received args: {:?}", args);
