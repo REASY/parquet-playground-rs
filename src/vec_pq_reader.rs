@@ -1,246 +1,208 @@
-use arrow::array::{
-    Array, ArrayBuilder, Float64Builder, GenericByteBuilder, Int64Builder, ListBuilder,
-    StringBuilder,
-};
-use arrow::datatypes::GenericStringType;
+use crate::errors;
+use arrow::array::{Array, ArrayBuilder, Float64Builder, Int64Builder, ListBuilder, StringBuilder};
 use parquet::column::reader::ColumnReaderImpl;
-use parquet::data_type::{AsBytes, ByteArrayType, DataType, DoubleType, Int64Type};
+use parquet::data_type::{ByteArrayType, DataType, DoubleType, Int64Type};
 use parquet::schema::types::ColumnDescriptor;
 
-pub fn read_string_column(
-    mut typed_rdr: ColumnReaderImpl<ByteArrayType>,
+pub trait NullableBuilder: ArrayBuilder {
+    fn append_null_value(&mut self);
+}
+
+impl NullableBuilder for Int64Builder {
+    fn append_null_value(&mut self) {
+        self.append_null()
+    }
+}
+
+impl NullableBuilder for Float64Builder {
+    fn append_null_value(&mut self) {
+        self.append_null()
+    }
+}
+
+impl NullableBuilder for StringBuilder {
+    fn append_null_value(&mut self) {
+        self.append_null()
+    }
+}
+
+impl<B: ArrayBuilder + NullableBuilder> NullableBuilder for ListBuilder<B> {
+    fn append_null_value(&mut self) {
+        self.append(false)
+    }
+}
+
+fn read_column<T, B, A, F>(
+    typed_rdr: ColumnReaderImpl<T>,
     col_desc: &ColumnDescriptor,
     batch_size: usize,
-) -> parquet::errors::Result<Box<dyn Array>> {
-    let is_simple_column = col_desc.max_rep_level() == 0;
-    if is_simple_column {
-        let mut def_levels = vec![];
-        let mut values: Vec<<ByteArrayType as DataType>::T> = vec![];
-        let mut builder: GenericByteBuilder<GenericStringType<i32>> = StringBuilder::new();
-        loop {
-            values.clear();
-            def_levels.clear();
-            let (records_read, values_read, levels_read) =
-                typed_rdr.read_records(batch_size, Some(&mut def_levels), None, &mut values)?;
-            if records_read == 0 && values_read == 0 && levels_read == 0 {
-                return Ok(Box::new(builder.finish()));
-            }
-            let mut v_idx: usize = 0;
-            for i in 0..levels_read {
-                if def_levels[i] == 0 {
-                    builder.append_null();
-                } else {
-                    let s = values[v_idx].as_utf8()?;
-                    builder.append_value(s);
-                    v_idx += 1;
-                }
-            }
-        }
+    append_fn: A,
+    factory_fn: F,
+) -> errors::Result<Box<dyn Array>>
+where
+    T: DataType,
+    B: ArrayBuilder + NullableBuilder + 'static,
+    A: Fn(&T::T, &mut B) -> errors::Result<()>,
+    F: Fn() -> B,
+{
+    if col_desc.max_rep_level() == 0 {
+        read_simple_column::<T, B, A, F>(typed_rdr, batch_size, append_fn, &factory_fn)
     } else {
-        let mut def_levels = vec![];
-        let mut rep_levels = vec![];
-        let mut values: Vec<<ByteArrayType as DataType>::T> = vec![];
-        let mut builder = ListBuilder::new(StringBuilder::new());
-        let mut rows: usize = 0;
-        let max_def_level = col_desc.max_def_level();
-        let opt_def_level = max_def_level - 1;
-        println!("max_def_level: {max_def_level}, opt_def_level: {opt_def_level}");
-        println!("def_levels: {:?}", def_levels);
-        loop {
-            let mut v_idx: usize = 0;
-            values.clear();
-            def_levels.clear();
-            rep_levels.clear();
-            let (records_read, values_read, levels_read) = typed_rdr.read_records(
-                batch_size,
-                Some(&mut def_levels),
-                Some(&mut rep_levels),
-                &mut values,
-            )?;
-            if records_read == 0 && values_read == 0 && levels_read == 0 {
-                return Ok(Box::new(builder.finish()));
-            }
-            for idx in 0..rep_levels.len() {
-                let def_level = def_levels[idx];
-                let rep_level = rep_levels[idx];
-                if rep_level == 0 && (v_idx > 0 || rows > 0) {
-                    builder.append(true);
-                    rows += 1;
-                }
-                if def_level == max_def_level {
-                    let s = values[v_idx].as_utf8()?;
-                    builder.values().append_value(s);
-                    v_idx += 1;
-                } else if def_level == opt_def_level {
-                    builder.values().append_null();
-                } else {
-                    panic!("{}", def_level);
-                }
+        read_repeated_column::<T, B, A, F>(typed_rdr, col_desc, batch_size, append_fn, &factory_fn)
+    }
+}
+
+fn read_simple_column<T, B, A, F>(
+    mut typed_rdr: ColumnReaderImpl<T>,
+    batch_size: usize,
+    append_fn: A,
+    factory_fn: &F,
+) -> errors::Result<Box<dyn Array>>
+where
+    T: DataType,
+    B: ArrayBuilder + NullableBuilder + 'static,
+    A: Fn(&T::T, &mut B) -> errors::Result<()>,
+    F: Fn() -> B,
+{
+    let mut def_levels = Vec::new();
+    let mut values = Vec::new();
+    let mut builder = factory_fn();
+
+    loop {
+        def_levels.clear();
+        values.clear();
+
+        let (records_read, values_read, levels_read) =
+            typed_rdr.read_records(batch_size, Some(&mut def_levels), None, &mut values)?;
+
+        if records_read == 0 && values_read == 0 && levels_read == 0 {
+            return Ok(Box::new(builder.finish()));
+        }
+
+        let mut val_idx = 0;
+        for &dl in &def_levels[..levels_read] {
+            if dl == 0 {
+                builder.append_null_value();
+            } else {
+                append_fn(&values[val_idx], &mut builder)?;
+                val_idx += 1;
             }
         }
     }
+}
+
+fn read_repeated_column<T, B, A, F>(
+    mut typed_rdr: ColumnReaderImpl<T>,
+    col_desc: &ColumnDescriptor,
+    batch_size: usize,
+    append_fn: A,
+    factory_fn: &F,
+) -> errors::Result<Box<dyn Array>>
+where
+    T: DataType,
+    B: ArrayBuilder + NullableBuilder + 'static,
+    A: Fn(&T::T, &mut B) -> errors::Result<()>,
+    F: Fn() -> B,
+{
+    let max_def_level = col_desc.max_def_level();
+    let opt_def_level = max_def_level.saturating_sub(1);
+
+    let inner_builder = factory_fn();
+    let mut list_builder = ListBuilder::new(inner_builder);
+
+    let mut def_levels = Vec::new();
+    let mut rep_levels = Vec::new();
+    let mut values = Vec::new();
+    let mut rows = 0;
+
+    loop {
+        def_levels.clear();
+        rep_levels.clear();
+        values.clear();
+
+        let (records_read, values_read, levels_read) = typed_rdr.read_records(
+            batch_size,
+            Some(&mut def_levels),
+            Some(&mut rep_levels),
+            &mut values,
+        )?;
+
+        if records_read == 0 && values_read == 0 && levels_read == 0 {
+            return Ok(Box::new(list_builder.finish()));
+        }
+
+        let mut val_idx = 0;
+        for i in 0..levels_read {
+            let dl = def_levels[i];
+            let rl = rep_levels[i];
+
+            if rl == 0 && (val_idx > 0 || rows > 0) {
+                list_builder.append(true);
+                rows += 1;
+            }
+
+            if dl == max_def_level {
+                append_fn(&values[val_idx], list_builder.values())?;
+                val_idx += 1;
+            } else if dl == opt_def_level {
+                list_builder.values().append_null_value();
+            } else {
+                // println!("Unexpected def_level: {dl}");
+            }
+        }
+    }
+}
+
+pub fn read_string_column(
+    typed_rdr: ColumnReaderImpl<ByteArrayType>,
+    col_desc: &ColumnDescriptor,
+    batch_size: usize,
+) -> errors::Result<Box<dyn Array>> {
+    read_column::<ByteArrayType, StringBuilder, _, _>(
+        typed_rdr,
+        col_desc,
+        batch_size,
+        |val, builder| {
+            let s = val.as_utf8()?;
+            builder.append_value(s);
+            Ok(())
+        },
+        || StringBuilder::new(),
+    )
 }
 
 pub fn read_i64_column(
-    mut typed_rdr: ColumnReaderImpl<Int64Type>,
+    typed_rdr: ColumnReaderImpl<Int64Type>,
     col_desc: &ColumnDescriptor,
     batch_size: usize,
-) -> parquet::errors::Result<Box<dyn Array>> {
-    let is_simple_column = col_desc.max_rep_level() == 0;
-    if is_simple_column {
-        let mut def_levels = vec![];
-        let mut values: Vec<<Int64Type as DataType>::T> = vec![];
-        let mut builder: Int64Builder = Int64Builder::new();
-        loop {
-            values.clear();
-            def_levels.clear();
-            let (records_read, values_read, levels_read) =
-                typed_rdr.read_records(batch_size, Some(&mut def_levels), None, &mut values)?;
-            if records_read == 0 && values_read == 0 && levels_read == 0 {
-                return Ok(Box::new(builder.finish()));
-            }
-            let mut v_idx: usize = 0;
-            for i in 0..levels_read {
-                if def_levels[i] == 0 {
-                    builder.append_null();
-                } else {
-                    let s = values[v_idx];
-                    builder.append_value(s);
-                    v_idx += 1;
-                }
-            }
-        }
-    } else {
-        let mut def_levels = vec![];
-        let mut rep_levels = vec![];
-        let mut values: Vec<<Int64Type as DataType>::T> = vec![];
-        let mut builder = ListBuilder::new(Int64Builder::new());
-        let mut rows: usize = 0;
-        let max_def_level = col_desc.max_def_level();
-        let opt_def_level = max_def_level - 1;
-        // println!("max_def_level: {max_def_level}, opt_def_level: {opt_def_level}");
-        // println!("def_levels: {:?}", def_levels);
-        loop {
-            let mut v_idx: usize = 0;
-            values.clear();
-            def_levels.clear();
-            rep_levels.clear();
-            let (records_read, values_read, levels_read) = typed_rdr.read_records(
-                batch_size,
-                Some(&mut def_levels),
-                Some(&mut rep_levels),
-                &mut values,
-            )?;
-            // println!(
-            //     "def_levels: {}, rep_levels: {}",
-            //     def_levels.len(),
-            //     rep_levels.len()
-            // );
-            // println!("rep_levels: {:?}", rep_levels);
-            // println!("values: {:?}", values);
-            // println!("records_read: {records_read}, values_read: {values_read}, levels_read: {levels_read}");
-            if records_read == 0 && values_read == 0 && levels_read == 0 {
-                return Ok(Box::new(builder.finish()));
-            }
-            for idx in 0..rep_levels.len() {
-                let def_level = def_levels[idx];
-                let rep_level = rep_levels[idx];
-                if rep_level == 0 && (v_idx > 0 || rows > 0) {
-                    builder.append(true);
-                    rows += 1;
-                }
-                if def_level == max_def_level {
-                    let s = values[v_idx];
-                    builder.values().append_value(s);
-                    v_idx += 1;
-                } else if def_level == opt_def_level {
-                    builder.values().append_null();
-                } else {
-                    panic!("{}", def_level);
-                }
-            }
-            // println!("builder: {}", builder.len());
-        }
-    }
+) -> errors::Result<Box<dyn Array>> {
+    read_column::<Int64Type, Int64Builder, _, _>(
+        typed_rdr,
+        col_desc,
+        batch_size,
+        |val, builder| {
+            builder.append_value(*val);
+            Ok(())
+        },
+        || Int64Builder::new(),
+    )
 }
 
 pub fn read_f64_column(
-    mut typed_rdr: ColumnReaderImpl<DoubleType>,
+    typed_rdr: ColumnReaderImpl<DoubleType>,
     col_desc: &ColumnDescriptor,
     batch_size: usize,
-) -> parquet::errors::Result<Box<dyn Array>> {
-    // println!("col_desc: {col_desc:?}");
-    let is_simple_column = col_desc.max_rep_level() == 0;
-    if is_simple_column {
-        let mut def_levels = vec![];
-        let mut values: Vec<<DoubleType as DataType>::T> = vec![];
-        let mut builder: Float64Builder = Float64Builder::new();
-        loop {
-            values.clear();
-            def_levels.clear();
-            let (records_read, values_read, levels_read) =
-                typed_rdr.read_records(batch_size, Some(&mut def_levels), None, &mut values)?;
-            if records_read == 0 && values_read == 0 && levels_read == 0 {
-                return Ok(Box::new(builder.finish()));
-            }
-            let mut v_idx: usize = 0;
-            for i in 0..levels_read {
-                if def_levels[i] == 0 {
-                    builder.append_null();
-                } else {
-                    let s = values[v_idx];
-                    builder.append_value(s);
-                    v_idx += 1;
-                }
-            }
-        }
-    } else {
-        let mut def_levels = vec![];
-        let mut rep_levels = vec![];
-        let mut values: Vec<<DoubleType as DataType>::T> = vec![];
-        let mut builder = ListBuilder::new(Float64Builder::new());
-        let mut rows: usize = 0;
-        let max_def_level = col_desc.max_def_level();
-        let opt_def_level = max_def_level - 1;
-        // println!("max_def_level: {max_def_level}, opt_def_level: {opt_def_level}");
-        loop {
-            let mut v_idx: usize = 0;
-            values.clear();
-            def_levels.clear();
-            rep_levels.clear();
-            let (records_read, values_read, levels_read) = typed_rdr.read_records(
-                batch_size,
-                Some(&mut def_levels),
-                Some(&mut rep_levels),
-                &mut values,
-            )?;
-            // println!("def_levels: {:?}", def_levels);
-            // println!("rep_levels: {:?}", rep_levels);
-            // println!("values: {:?}", values);
-            // println!("records_read: {records_read}, values_read: {values_read}, levels_read: {levels_read}");
-
-            if records_read == 0 && values_read == 0 && levels_read == 0 {
-                return Ok(Box::new(builder.finish()));
-            }
-            for idx in 0..rep_levels.len() {
-                let def_level = def_levels[idx];
-                let rep_level = rep_levels[idx];
-                if rep_level == 0 && (v_idx > 0 || rows > 0) {
-                    builder.append(true);
-                    rows += 1;
-                }
-                if def_level == max_def_level {
-                    let s = values[v_idx];
-                    builder.values().append_value(s);
-                    v_idx += 1;
-                } else if def_level == opt_def_level {
-                    builder.values().append_null();
-                } else {
-                    // panic!("{}", def_level);
-                }
-            }
-        }
-    }
+) -> errors::Result<Box<dyn Array>> {
+    read_column::<DoubleType, Float64Builder, _, _>(
+        typed_rdr,
+        col_desc,
+        batch_size,
+        |val, builder| {
+            builder.append_value(*val);
+            Ok(())
+        },
+        || Float64Builder::new(),
+    )
 }
 
 #[cfg(test)]

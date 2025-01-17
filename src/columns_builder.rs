@@ -11,6 +11,7 @@ use std::sync::Arc;
 pub trait ColumnsBuilder<'a> {
     type T;
 
+    fn get_schema(&self) -> Arc<Schema>;
     fn get_batch(&mut self) -> Result<RecordBatch, ArrowError>;
     fn append(&mut self, msg: &'a Self::T) -> Result<(), ArrowError>;
 
@@ -29,6 +30,10 @@ pub struct Builders {
 
 impl<'a> ColumnsBuilder<'a> for Builders {
     type T = Series;
+
+    fn get_schema(&self) -> Arc<Schema> {
+        self.schema.clone()
+    }
 
     fn get_batch(&mut self) -> Result<RecordBatch, ArrowError> {
         // The order in result vector must follow the order of fields in the schema from `ThisSchema::new`

@@ -1,8 +1,8 @@
 use arrow::datatypes::{DataType, Field, Fields, Schema, TimeUnit};
-use std::sync::Arc;
 use parquet::basic::Repetition;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::schema::types::{Type as ParquetType, TypePtr};
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct ThisSchema {
@@ -47,7 +47,6 @@ impl ThisSchema {
     }
 }
 
-
 pub fn parquet_metadata_to_arrow_schema(metadata: &ParquetMetaData) -> Schema {
     let parquet_schema = metadata.file_metadata().schema();
     let fields = convert_parquet_schema_to_arrow_fields(parquet_schema.get_fields());
@@ -70,18 +69,20 @@ fn convert_parquet_field_to_arrow_field(field: &ParquetType) -> Field {
 
 fn convert_parquet_type_to_arrow_type(field: &ParquetType) -> DataType {
     match field {
-        ParquetType::PrimitiveType { physical_type, type_length, .. } => {
-            match physical_type {
-                parquet::basic::Type::BOOLEAN => DataType::Boolean,
-                parquet::basic::Type::INT32 => DataType::Int32,
-                parquet::basic::Type::INT64 => DataType::Int64,
-                parquet::basic::Type::INT96 => DataType::Timestamp(TimeUnit::Nanosecond, None),
-                parquet::basic::Type::FLOAT => DataType::Float32,
-                parquet::basic::Type::DOUBLE => DataType::Float64,
-                parquet::basic::Type::BYTE_ARRAY => DataType::Binary,
-                parquet::basic::Type::FIXED_LEN_BYTE_ARRAY => DataType::FixedSizeBinary(*type_length),
-            }
-        }
+        ParquetType::PrimitiveType {
+            physical_type,
+            type_length,
+            ..
+        } => match physical_type {
+            parquet::basic::Type::BOOLEAN => DataType::Boolean,
+            parquet::basic::Type::INT32 => DataType::Int32,
+            parquet::basic::Type::INT64 => DataType::Int64,
+            parquet::basic::Type::INT96 => DataType::Timestamp(TimeUnit::Nanosecond, None),
+            parquet::basic::Type::FLOAT => DataType::Float32,
+            parquet::basic::Type::DOUBLE => DataType::Float64,
+            parquet::basic::Type::BYTE_ARRAY => DataType::Binary,
+            parquet::basic::Type::FIXED_LEN_BYTE_ARRAY => DataType::FixedSizeBinary(*type_length),
+        },
         ParquetType::GroupType { fields, .. } => {
             if is_list_type(field) {
                 let element_type = &fields[0].get_fields()[0];
@@ -96,7 +97,12 @@ fn convert_parquet_type_to_arrow_type(field: &ParquetType) -> DataType {
 fn is_list_type(field: &ParquetType) -> bool {
     if let ParquetType::GroupType { fields, .. } = field {
         if fields.len() == 1 {
-            if let ParquetType::GroupType { basic_info, fields: inner_fields, .. } = fields[0].as_ref() {
+            if let ParquetType::GroupType {
+                basic_info,
+                fields: inner_fields,
+                ..
+            } = fields[0].as_ref()
+            {
                 return basic_info.name() == "list" && inner_fields.len() == 1;
             }
         }
