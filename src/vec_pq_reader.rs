@@ -126,15 +126,10 @@ where
             Some(&mut rep_levels),
             &mut values,
         )?;
-        println!("rep_levels: {:?}", rep_levels);
-        println!("values: {:?}", values);
-        println!(
-            "records_read: {records_read}, values_read: {values_read}, levels_read: {levels_read}"
-        );
+
         if records_read == 0 && values_read == 0 && levels_read == 0 {
             list_builder.append(true);
             let array = list_builder.finish();
-            println!("array: {:?}", array);
             return Ok(Box::new(array));
         }
 
@@ -153,7 +148,7 @@ where
             } else if dl == opt_def_level {
                 list_builder.values().append_null_value();
             } else {
-                // println!("Unexpected def_level: {dl}");
+                panic!("Unexpected def_level: {dl}");
             }
         }
         total_records_read += records_read;
@@ -217,11 +212,12 @@ mod tests {
     use crate::columns_builder::ColumnsBuilder;
     use crate::errors;
     use crate::schema::parquet_metadata_to_arrow_schema;
-    use crate::vec_pq_reader::{read_i64_column, read_string_column};
+    use crate::vec_pq_reader::{read_f64_column, read_i64_column, read_string_column};
     use arrow::array::{
-        Array, ArrayRef, AsArray, Int64Builder, ListBuilder, RecordBatch, StringBuilder,
+        Array, ArrayRef, AsArray, Float64Builder, Int64Builder, ListBuilder, RecordBatch,
+        StringBuilder,
     };
-    use arrow::datatypes::{ArrowPrimitiveType, DataType, Field, Int64Type, Schema};
+    use arrow::datatypes::{ArrowPrimitiveType, DataType, Field, Float64Type, Int64Type, Schema};
     use arrow::error::ArrowError;
     use parquet::arrow::arrow_writer::ArrowWriterOptions;
     use parquet::arrow::ArrowWriter;
@@ -263,6 +259,8 @@ mod tests {
         list_str_field: ListBuilder<StringBuilder>,
         i64_field: Int64Builder,
         list_i64_field: ListBuilder<Int64Builder>,
+        f64_field: Float64Builder,
+        list_f64_field: ListBuilder<Float64Builder>,
     }
 
     #[derive(Clone)]
@@ -271,6 +269,8 @@ mod tests {
         list_str: Vec<Option<String>>,
         i64: Option<i64>,
         list_i64: Vec<Option<i64>>,
+        f64: Option<f64>,
+        list_f64: Vec<Option<f64>>,
     }
 
     impl TestBuilderRow {
@@ -279,6 +279,8 @@ mod tests {
             str_list: Vec<Option<&str>>,
             i64: Option<i64>,
             list_i64: Vec<Option<i64>>,
+            f64: Option<f64>,
+            list_f64: Vec<Option<f64>>,
         ) -> Self {
             let list_str: Vec<Option<String>> =
                 str_list.iter().map(|x| x.map(|c| c.to_owned())).collect();
@@ -287,6 +289,8 @@ mod tests {
                 list_str,
                 i64,
                 list_i64,
+                f64,
+                list_f64,
             }
         }
     }
@@ -306,6 +310,12 @@ mod tests {
                     DataType::List(Arc::new(Field::new_list_field(DataType::Int64, true))),
                     true,
                 ),
+                Field::new("f64_field", DataType::Float64, true),
+                Field::new(
+                    "list_f64_field",
+                    DataType::List(Arc::new(Field::new_list_field(DataType::Float64, true))),
+                    true,
+                ),
             ];
             TestBuilder {
                 schema: Arc::new(Schema::new(fields)),
@@ -313,6 +323,8 @@ mod tests {
                 list_str_field: ListBuilder::new(StringBuilder::new()),
                 i64_field: Int64Builder::new(),
                 list_i64_field: ListBuilder::new(Int64Builder::new()),
+                f64_field: Float64Builder::new(),
+                list_f64_field: ListBuilder::new(Float64Builder::new()),
             }
         }
     }
@@ -330,6 +342,8 @@ mod tests {
                 Arc::new(self.list_str_field.finish()),
                 Arc::new(self.i64_field.finish()),
                 Arc::new(self.list_i64_field.finish()),
+                Arc::new(self.f64_field.finish()),
+                Arc::new(self.list_f64_field.finish()),
             ];
             RecordBatch::try_new(self.schema.clone(), columns)
         }
@@ -339,6 +353,8 @@ mod tests {
             self.list_str_field.append_value(msg.list_str.clone());
             self.i64_field.append_option(msg.i64);
             self.list_i64_field.append_value(msg.list_i64.clone());
+            self.f64_field.append_option(msg.f64);
+            self.list_f64_field.append_value(msg.list_f64.clone());
             Ok(())
         }
 
@@ -347,6 +363,8 @@ mod tests {
             self.list_str_field = ListBuilder::new(StringBuilder::new());
             self.i64_field = Int64Builder::new();
             self.list_i64_field = ListBuilder::new(Int64Builder::new());
+            self.f64_field = Float64Builder::new();
+            self.list_f64_field = ListBuilder::new(Float64Builder::new());
             Ok(())
         }
     }
@@ -357,44 +375,93 @@ mod tests {
                 None,
                 vec![None, Some("1"), None, Some("2")],
                 Some(0),
-                vec![Some(1), None, Some(2), None, None, None],
+                vec![
+                    Some(1),
+                    Some(0),
+                    Some(2),
+                    Some(-1),
+                    Some(-2),
+                    Some(i64::MAX),
+                    Some(i64::MIN),
+                ],
+                None,
+                vec![
+                    Some(0.0),
+                    Some(1.0),
+                    Some(-1.0),
+                    Some(f64::MAX),
+                    Some(f64::MIN),
+                    None,
+                ],
             ),
             TestBuilderRow::new(
                 None,
                 vec![Some("3"), Some("4"), None, Some("5")],
-                Some(3),
+                Some(i64::MAX),
                 vec![Some(4)],
+                Some(f64::MAX),
+                vec![None, None, None, None],
             ),
             TestBuilderRow::new(
                 Some("hello"),
                 vec![None, None],
-                Some(5),
+                Some(i64::MIN),
                 vec![None, None, None, None, None],
+                Some(f64::MIN),
+                vec![
+                    Some(-123.456),
+                    Some(-456.789),
+                    Some(123.456),
+                    Some(456.789),
+                    Some(0.0),
+                ],
             ),
             TestBuilderRow::new(
                 Some("world"),
                 vec![Some("6"), Some("7")],
                 Some(6),
                 vec![Some(7), Some(8), Some(8), Some(8), Some(8)],
+                Some(f64::MIN),
+                vec![
+                    Some(-5.0),
+                    Some(5.0),
+                    Some(5.5),
+                    None,
+                    None,
+                    Some(6.0123456),
+                ],
             ),
             TestBuilderRow::new(
                 None,
                 vec![None],
                 None,
                 vec![Some(10), Some(11), Some(12), Some(13), Some(14)],
+                Some(1.0),
+                vec![None, None, None, Some(100.0), Some(200.0), Some(300.0)],
             ),
-            TestBuilderRow::new(None, vec![None], None, vec![None, Some(15)]),
+            TestBuilderRow::new(
+                None,
+                vec![None],
+                None,
+                vec![None, Some(15)],
+                Some(0.0),
+                vec![None, None, None],
+            ),
             TestBuilderRow::new(
                 Some("from"),
                 vec![Some("8"), Some("9"), None, None, Some("10")],
                 None,
                 vec![Some(16), Some(17)],
+                Some(123456789.01),
+                vec![Some(0.0), Some(1.0), Some(2.0)],
             ),
             TestBuilderRow::new(
                 Some("Rust"),
                 vec![None, None, None, None, None, Some("12")],
                 Some(18),
                 vec![None, None, Some(19), Some(20)],
+                Some(f64::EPSILON),
+                vec![Some(f64::EPSILON), Some(f64::EPSILON), Some(f64::MIN)],
             ),
         ]
     }
@@ -459,7 +526,9 @@ mod tests {
     }
 
     struct InitializedParquet {
+        #[allow(unused)]
         temp_file: NamedTempFile,
+        #[allow(unused)]
         file_metadata: FileMetaData,
         reader: SerializedFileReader<File>,
         schema: Schema,
@@ -544,7 +613,7 @@ mod tests {
             usize,
         ) -> errors::Result<Box<dyn Array>>,
         E: Fn(&TestBuilderRow) -> &Vec<Option<T>>,
-        T: PartialEq + std::fmt::Debug + Clone,
+        T: PartialEq + std::fmt::Debug + Clone + std::fmt::Display,
         S: ListReader<T>,
     {
         let inited = init_parquet(&values.to_vec())?;
@@ -572,7 +641,6 @@ mod tests {
                 .iter()
                 .map(|row| extract_expected(row).clone())
                 .collect();
-
             assert_eq!(expected_values, read_values);
         }
         Ok(())
@@ -626,6 +694,32 @@ mod tests {
             read_i64_column,
             |r| &r.list_i64,
             &PrimitiveListReader::<Int64Type>(PhantomData),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_for_field_optional_f64() -> errors::Result<()> {
+        let values = get_rows();
+        test_read_any_scalar_column::<parquet::data_type::DoubleType, f64, _, _, _>(
+            &values,
+            "f64_field",
+            read_f64_column,
+            |r| r.f64,
+            &PrimitiveReader::<Float64Type>(PhantomData),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_for_field_list_of_optional_f64_field() -> errors::Result<()> {
+        let values = get_rows();
+        test_read_any_list_column::<parquet::data_type::DoubleType, f64, _, _, _>(
+            &values,
+            "list_f64_field",
+            read_f64_column,
+            |r| &r.list_f64,
+            &PrimitiveListReader::<Float64Type>(PhantomData),
         )?;
         Ok(())
     }
