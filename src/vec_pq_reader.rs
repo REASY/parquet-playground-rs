@@ -169,7 +169,7 @@ pub fn read_string_column(
             builder.append_value(s);
             Ok(())
         },
-        || StringBuilder::new(),
+        StringBuilder::new,
     )
 }
 
@@ -186,7 +186,7 @@ pub fn read_i64_column(
             builder.append_value(*val);
             Ok(())
         },
-        || Int64Builder::new(),
+        Int64Builder::new,
     )
 }
 
@@ -203,7 +203,7 @@ pub fn read_f64_column(
             builder.append_value(*val);
             Ok(())
         },
-        || Float64Builder::new(),
+        Float64Builder::new,
     )
 }
 

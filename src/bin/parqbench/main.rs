@@ -50,6 +50,7 @@ fn main() -> errors::Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn read_parquet(path: &str) -> Result<Vec<Row>, AppError> {
     let f = File::open(path)?;
     let reader = SerializedFileReader::new(f)?;
@@ -73,10 +74,9 @@ fn read_parquet_v2(path: &str) -> Result<Vec<Box<dyn Array>>, AppError> {
     let schema = parquet_metadata_to_arrow_schema(reader.metadata());
     let rg = reader.get_row_group(0)?;
 
-    let mut col_idx: usize = 0;
     let mut result: Vec<Box<dyn Array>> = Vec::new();
     const BATCH_SIZE: usize = 1000;
-    for c in schema.fields.iter() {
+    for (col_idx, c) in schema.fields.iter().enumerate() {
         let col_rdr = rg.get_column_reader(col_idx)?;
         let col_desc = rg.metadata().column(col_idx).column_descr();
         match c.data_type() {
@@ -110,7 +110,6 @@ fn read_parquet_v2(path: &str) -> Result<Vec<Box<dyn Array>>, AppError> {
             },
             x => panic!("{:?}", x),
         }
-        col_idx += 1;
     }
     Ok(result)
 }
