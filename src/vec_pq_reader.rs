@@ -41,7 +41,7 @@ fn read_column<T, B, A, F>(
 ) -> errors::Result<Box<dyn Array>>
 where
     T: DataType,
-    B: ArrayBuilder + NullableBuilder + 'static,
+    B: ArrayBuilder + NullableBuilder + 'static + std::fmt::Debug,
     A: Fn(&T::T, &mut B) -> errors::Result<()>,
     F: Fn() -> B,
 {
@@ -100,7 +100,7 @@ fn read_repeated_column<T, B, A, F>(
 ) -> errors::Result<Box<dyn Array>>
 where
     T: DataType,
-    B: ArrayBuilder + NullableBuilder + 'static,
+    B: ArrayBuilder + NullableBuilder + 'static + std::fmt::Debug,
     A: Fn(&T::T, &mut B) -> errors::Result<()>,
     F: Fn() -> B,
 {
@@ -126,9 +126,13 @@ where
             Some(&mut rep_levels),
             &mut values,
         )?;
-
+        println!("rep_levels: {:?}", rep_levels);
+        println!("values: {:?}", values);
+        println!("records_read: {records_read}, values_read: {values_read}, levels_read: {levels_read}");
         if records_read == 0 && values_read == 0 && levels_read == 0 {
-            return Ok(Box::new(list_builder.finish()));
+            let array = list_builder.finish();
+            println!("array: {:?}", array);
+            return Ok(Box::new(array));
         }
 
         let mut val_idx = 0;
@@ -205,24 +209,115 @@ pub fn read_f64_column(
     )
 }
 
+
+pub fn read_i64_column_old(
+    mut typed_rdr: ColumnReaderImpl<Int64Type>,
+    col_desc: &ColumnDescriptor,
+    batch_size: usize,
+) -> errors::Result<Box<dyn Array>> {
+    let is_simple_column = col_desc.max_rep_level() == 0;
+    if is_simple_column {
+        let mut def_levels = vec![];
+        let mut values: Vec<<Int64Type as DataType>::T> = vec![];
+        let mut builder: Int64Builder = Int64Builder::new();
+        loop {
+            values.clear();
+            def_levels.clear();
+            let (records_read, values_read, levels_read) =
+                typed_rdr.read_records(batch_size, Some(&mut def_levels), None, &mut values)?;
+            if records_read == 0 && values_read == 0 && levels_read == 0 {
+                return Ok(Box::new(builder.finish()));
+            }
+            let mut v_idx: usize = 0;
+            for i in 0..levels_read {
+                if def_levels[i] == 0 {
+                    builder.append_null();
+                } else {
+                    let s = values[v_idx];
+                    builder.append_value(s);
+                    v_idx += 1;
+                }
+            }
+        }
+    } else {
+        let mut def_levels = vec![];
+        let mut rep_levels = vec![];
+        let mut values: Vec<<Int64Type as DataType>::T> = vec![];
+        let mut builder = ListBuilder::new(Int64Builder::new());
+        let mut rows: usize = 0;
+        let max_def_level = col_desc.max_def_level();
+        let opt_def_level = max_def_level - 1;
+        println!("max_def_level: {max_def_level}, opt_def_level: {opt_def_level}");
+        println!("def_levels: {:?}", def_levels);
+        loop {
+            let mut v_idx: usize = 0;
+            values.clear();
+            def_levels.clear();
+            rep_levels.clear();
+            let (records_read, values_read, levels_read) = typed_rdr.read_records(
+                batch_size,
+                Some(&mut def_levels),
+                Some(&mut rep_levels),
+                &mut values,
+            )?;
+            println!(
+                "def_levels: {}, rep_levels: {}",
+                def_levels.len(),
+                rep_levels.len()
+            );
+            println!("rep_levels: {:?}", rep_levels);
+            println!("values: {:?}", values);
+            println!("records_read: {records_read}, values_read: {values_read}, levels_read: {levels_read}");
+            if records_read == 0 && values_read == 0 && levels_read == 0 {
+                let array = builder.finish();
+                println!("array: {:?}", array);
+                return Ok(Box::new(array));
+            }
+            for idx in 0..rep_levels.len() {
+                let def_level = def_levels[idx];
+                let rep_level = rep_levels[idx];
+                if rep_level == 0 && (v_idx > 0 || rows > 0) {
+                    builder.append(true);
+                    rows += 1;
+                }
+                if def_level == max_def_level {
+                    let s = values[v_idx];
+                    builder.values().append_value(s);
+                    v_idx += 1;
+                } else if def_level == opt_def_level {
+                    builder.values().append_null();
+                } else {
+                    panic!("{}", def_level);
+                }
+            }
+            // println!("builder: {}", builder.len());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::columns_builder::ColumnsBuilder;
     use crate::errors;
     use crate::schema::parquet_metadata_to_arrow_schema;
-    use crate::vec_pq_reader::read_string_column;
-    use arrow::array::{ArrayRef, AsArray, ListBuilder, RecordBatch, StringBuilder};
-    use arrow::datatypes::{DataType, Field, Schema};
+    use crate::vec_pq_reader::{read_i64_column, read_i64_column_old, read_string_column};
+    use arrow::array::{
+        Array, ArrayRef, AsArray, Int64Builder, ListBuilder, RecordBatch, StringBuilder,
+    };
+    use arrow::datatypes::{
+        ArrowPrimitiveType, ByteArrayType, DataType, Field, Int64Type, Schema, Utf8Type,
+    };
     use arrow::error::ArrowError;
     use parquet::arrow::arrow_writer::ArrowWriterOptions;
     use parquet::arrow::ArrowWriter;
     use parquet::basic::{Compression, ZstdLevel};
-    use parquet::column::reader::get_typed_column_reader;
+    use parquet::column::reader::{get_typed_column_reader, ColumnReaderImpl};
     use parquet::file::properties::{EnabledStatistics, WriterProperties, WriterVersion};
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use parquet::format::FileMetaData;
     use parquet::schema::types::ColumnDescriptor;
     use std::fs::File;
+    use std::marker::PhantomData;
     use std::sync::Arc;
     use tempfile::NamedTempFile;
 
@@ -247,29 +342,41 @@ mod tests {
         Ok(md)
     }
 
-    pub struct StrBuilder {
+    pub struct TestBuilder {
         pub schema: Arc<Schema>,
         str_field: StringBuilder,
         list_str_field: ListBuilder<StringBuilder>,
+        i64_field: Int64Builder,
+        list_i64_field: ListBuilder<Int64Builder>,
     }
 
-    pub struct StrBuilderRow {
+    #[derive(Clone)]
+    pub struct TestBuilderRow {
         str: Option<String>,
         list_str: Vec<Option<String>>,
+        i64: Option<i64>,
+        list_i64: Vec<Option<i64>>,
     }
 
-    impl StrBuilderRow {
-        fn new(str: Option<&str>, list: Vec<Option<&str>>) -> Self {
+    impl TestBuilderRow {
+        fn new(
+            str: Option<&str>,
+            str_list: Vec<Option<&str>>,
+            i64: Option<i64>,
+            list_i64: Vec<Option<i64>>,
+        ) -> Self {
             let list_str: Vec<Option<String>> =
-                list.iter().map(|x| x.map(|c| c.to_owned())).collect();
-            StrBuilderRow {
+                str_list.iter().map(|x| x.map(|c| c.to_owned())).collect();
+            TestBuilderRow {
                 str: str.map(|x| x.to_owned()),
                 list_str,
+                i64,
+                list_i64,
             }
         }
     }
 
-    impl StrBuilder {
+    impl TestBuilder {
         fn new() -> Self {
             let fields = vec![
                 Field::new("str_field", DataType::Utf8, true),
@@ -278,17 +385,25 @@ mod tests {
                     DataType::List(Arc::new(Field::new_list_field(DataType::Utf8, true))),
                     true,
                 ),
+                Field::new("i64_field", DataType::Int64, true),
+                Field::new(
+                    "list_i64_field",
+                    DataType::List(Arc::new(Field::new_list_field(DataType::Int64, true))),
+                    true,
+                ),
             ];
-            StrBuilder {
+            TestBuilder {
                 schema: Arc::new(Schema::new(fields)),
                 str_field: StringBuilder::new(),
                 list_str_field: ListBuilder::new(StringBuilder::new()),
+                i64_field: Int64Builder::new(),
+                list_i64_field: ListBuilder::new(Int64Builder::new()),
             }
         }
     }
 
-    impl<'a> ColumnsBuilder<'a> for StrBuilder {
-        type T = StrBuilderRow;
+    impl<'a> ColumnsBuilder<'a> for TestBuilder {
+        type T = TestBuilderRow;
 
         fn get_schema(&self) -> Arc<Schema> {
             self.schema.clone()
@@ -298,6 +413,8 @@ mod tests {
             let columns: Vec<ArrayRef> = vec![
                 Arc::new(self.str_field.finish()),
                 Arc::new(self.list_str_field.finish()),
+                Arc::new(self.i64_field.finish()),
+                Arc::new(self.list_i64_field.finish()),
             ];
             RecordBatch::try_new(self.schema.clone(), columns)
         }
@@ -305,110 +422,295 @@ mod tests {
         fn append(&mut self, msg: &'a Self::T) -> Result<(), ArrowError> {
             self.str_field.append_option(msg.str.clone());
             self.list_str_field.append_value(msg.list_str.clone());
+            self.i64_field.append_option(msg.i64);
+            self.list_i64_field.append_value(msg.list_i64.clone());
             Ok(())
         }
 
         fn reset(&mut self) -> Result<(), ArrowError> {
             self.str_field = StringBuilder::new();
             self.list_str_field = ListBuilder::new(StringBuilder::new());
+            self.i64_field = Int64Builder::new();
+            self.list_i64_field = ListBuilder::new(Int64Builder::new());
             Ok(())
         }
     }
 
-    fn get_str_values() -> Vec<StrBuilderRow> {
+    fn get_rows() -> Vec<TestBuilderRow> {
         vec![
-            StrBuilderRow::new(None, vec![None, Some("1"), None, Some("2")]),
-            StrBuilderRow::new(None, vec![Some("3"), Some("4"), None, Some("5")]),
-            StrBuilderRow::new(Some("hello"), vec![None, None]),
-            StrBuilderRow::new(Some("world"), vec![Some("6"), Some("7")]),
-            StrBuilderRow::new(None, vec![None]),
-            StrBuilderRow::new(None, vec![None]),
-            StrBuilderRow::new(
+            TestBuilderRow::new(
+                None,
+                vec![None, Some("1"), None, Some("2")],
+                Some(0),
+                vec![Some(1), None, Some(2), None, None, None],
+            ),
+            TestBuilderRow::new(
+                None,
+                vec![Some("3"), Some("4"), None, Some("5")],
+                Some(3),
+                vec![Some(4)],
+            ),
+            TestBuilderRow::new(
+                Some("hello"),
+                vec![None, None],
+                Some(5),
+                vec![None, None, None, None, None],
+            ),
+            TestBuilderRow::new(
+                Some("world"),
+                vec![Some("6"), Some("7")],
+                Some(6),
+                vec![Some(7), Some(8), Some(8), Some(8), Some(8)],
+            ),
+            TestBuilderRow::new(
+                None,
+                vec![None],
+                None,
+                vec![Some(10), Some(11), Some(12), Some(13), Some(14)],
+            ),
+            TestBuilderRow::new(None, vec![None], None, vec![None, Some(15)]),
+            TestBuilderRow::new(
                 Some("from"),
                 vec![Some("8"), Some("9"), None, None, Some("10")],
+                None,
+                vec![Some(16), Some(17)],
             ),
-            StrBuilderRow::new(Some("Rust"), vec![None, None, None, None, None, Some("12")]),
+            TestBuilderRow::new(
+                Some("Rust"),
+                vec![None, None, None, None, None, Some("12")],
+                Some(18),
+                vec![None, None, Some(19), Some(20)],
+            ),
         ]
     }
 
-    #[test]
-    fn test_read_for_field_optional_string() -> errors::Result<()> {
-        let values: Vec<StrBuilderRow> = get_str_values();
-        let mut builder = StrBuilder::new();
-        for v in &values {
-            builder.append(v)?;
+    trait ScalarReader<T> {
+        fn to_vec_option(&self, array: &dyn Array) -> Vec<Option<T>>;
+    }
+
+    pub struct PrimitiveReader<A: ArrowPrimitiveType>(PhantomData<A>);
+    impl<A: ArrowPrimitiveType> ScalarReader<A::Native> for PrimitiveReader<A> {
+        fn to_vec_option(&self, array: &dyn Array) -> Vec<Option<A::Native>> {
+            array.as_primitive::<A>().iter().collect()
         }
-        let temp_file = NamedTempFile::with_suffix(".parquet")?;
-        let path = temp_file.path();
-        let _md = create_parquet(temp_file.as_file(), Box::new(builder))?;
+    }
 
-        let file = File::open(path)?;
-        let reader = SerializedFileReader::new(file)?;
-        let schema = parquet_metadata_to_arrow_schema(reader.metadata());
-
-        let rg = reader.get_row_group(0)?;
-
-        let str_field_col = schema.column_with_name("str_field").unwrap();
-        let str_field_col_desc: &ColumnDescriptor =
-            rg.metadata().column(str_field_col.0).column_descr();
-
-        for batch_size in 1..=values.len() {
-            let col_rdr = get_typed_column_reader::<parquet::data_type::ByteArrayType>(
-                rg.get_column_reader(str_field_col.0)?,
-            );
-            let read_data = read_string_column(col_rdr, str_field_col_desc, batch_size)?;
-            let read_values: Vec<Option<String>> = read_data
+    pub struct StringReader;
+    impl ScalarReader<String> for StringReader {
+        fn to_vec_option(&self, array: &dyn Array) -> Vec<Option<String>> {
+            array
                 .as_string::<i32>()
                 .iter()
-                .map(|c| c.map(|x| x.to_owned()))
+                .map(|s| s.map(|x| x.to_string()))
+                .collect()
+        }
+    }
+
+    trait ListReader<T> {
+        fn to_list_vec(&self, array: &dyn Array) -> Vec<Vec<Option<T>>>;
+    }
+
+    pub struct PrimitiveListReader<A: ArrowPrimitiveType>(pub PhantomData<A>);
+    impl<A: ArrowPrimitiveType> ListReader<A::Native> for PrimitiveListReader<A> {
+        fn to_list_vec(&self, array: &dyn Array) -> Vec<Vec<Option<A::Native>>> {
+            let list_array = array.as_list::<i32>();
+            (0..list_array.len())
+                .map(|idx| {
+                    // Downcast the sub-array to the actual primitive array
+                    let sub_array = list_array.value(idx);
+                    let typed_sub_array = sub_array.as_primitive::<A>();
+                    // Collect each element as Option<A::Native>
+                    typed_sub_array.iter().collect()
+                })
+                .collect()
+        }
+    }
+
+    pub struct StringListReader;
+    impl ListReader<String> for StringListReader {
+        fn to_list_vec(&self, array: &dyn Array) -> Vec<Vec<Option<String>>> {
+            let list_array = array.as_list::<i32>();
+            (0..list_array.len())
+                .map(|idx| {
+                    let sub_array = list_array.value(idx);
+                    let typed_sub_array = sub_array.as_string::<i32>();
+                    typed_sub_array
+                        .iter()
+                        .map(|opt_str| opt_str.map(|s| s.to_owned()))
+                        .collect()
+                })
+                .collect()
+        }
+    }
+
+    struct InitializedParquet {
+        temp_file: NamedTempFile,
+        file_metadata: FileMetaData,
+        reader: SerializedFileReader<File>,
+        schema: Schema,
+    }
+
+    fn init_parquet(values: &Vec<TestBuilderRow>) -> errors::Result<InitializedParquet> {
+        let mut builder = TestBuilder::new();
+        for v in values {
+            builder.append(v)?;
+        }
+
+        let temp_file: NamedTempFile = NamedTempFile::with_suffix(".parquet")?;
+        let path = temp_file.path();
+        let md = create_parquet(temp_file.as_file(), Box::new(builder))?;
+
+        let file = File::open(path)?;
+        let reader: SerializedFileReader<File> = SerializedFileReader::new(file)?;
+        let schema: Schema = parquet_metadata_to_arrow_schema(reader.metadata());
+        Ok(InitializedParquet {
+            temp_file,
+            file_metadata: md,
+            reader,
+            schema,
+        })
+    }
+
+    fn test_read_any_scalar_column<ParquetT, T, E, R, S>(
+        values: &[TestBuilderRow],
+        field_name: &str,
+        read_fn: R,
+        extract_expected: E,
+        scalar_rdr: &S,
+    ) -> errors::Result<()>
+    where
+        ParquetT: parquet::data_type::DataType,
+        R: Fn(
+            ColumnReaderImpl<ParquetT>,
+            &ColumnDescriptor,
+            usize,
+        ) -> errors::Result<Box<dyn Array>>,
+        E: Fn(&TestBuilderRow) -> Option<T>,
+        T: PartialEq + std::fmt::Debug,
+        S: ScalarReader<T>,
+    {
+        let inited = init_parquet(&values.to_vec())?;
+        let rg = inited.reader.get_row_group(0)?;
+
+        let (field_index, _) = inited
+            .schema
+            .column_with_name(field_name)
+            .ok_or_else(|| ArrowError::InvalidArgumentError(field_name.to_string()))?;
+        let field_desc: &ColumnDescriptor = rg.metadata().column(field_index).column_descr();
+
+        // Test with different batch sizes
+        for batch_size in 1..=values.len() {
+            let col_reader = rg.get_column_reader(field_index)?;
+            let typed_reader = get_typed_column_reader::<ParquetT>(col_reader);
+            let array = read_fn(typed_reader, field_desc, batch_size)?;
+
+            let read_values = scalar_rdr.to_vec_option(&*array);
+
+            let expected_values: Vec<Option<T>> =
+                values.iter().map(|v| extract_expected(v)).collect();
+
+            assert_eq!(expected_values, read_values);
+        }
+        Ok(())
+    }
+
+    fn test_read_any_list_column<ParquetT, T, E, R, S>(
+        values: &[TestBuilderRow],
+        field_name: &str,
+        read_fn: R,
+        extract_expected: E,
+        list_rdr: &S,
+    ) -> errors::Result<()>
+    where
+        ParquetT: parquet::data_type::DataType,
+        R: Fn(
+            ColumnReaderImpl<ParquetT>,
+            &ColumnDescriptor,
+            usize,
+        ) -> errors::Result<Box<dyn Array>>,
+        E: Fn(&TestBuilderRow) -> &Vec<Option<T>>,
+        T: PartialEq + std::fmt::Debug + Clone,
+        S: ListReader<T>,
+    {
+        let inited = init_parquet(&values.to_vec())?;
+        let rg = inited.reader.get_row_group(0)?;
+
+        let (field_index, _) = inited
+            .schema
+            .column_with_name(field_name)
+            .ok_or_else(|| ArrowError::InvalidArgumentError(field_name.to_string()))?;
+        let field_desc: &ColumnDescriptor = rg.metadata().column(field_index).column_descr();
+
+        // Test with different batch sizes
+        for batch_size in 1..=values.len() {
+            let col_reader = rg.get_column_reader(field_index)?;
+            let typed_reader = get_typed_column_reader::<ParquetT>(col_reader);
+            let array = read_fn(typed_reader, field_desc, batch_size)?;
+
+            // The trait does the conversion to Vec<Vec<Option<RustVal>>>
+            let read_values: Vec<Vec<Option<T>>> = list_rdr.to_list_vec(&*array);
+            println!("read_values: {:?}", read_values);
+
+            // Compare with the "expected" data from `TestBuilderRow`
+            let expected_values: Vec<Vec<Option<T>>> = values
+                .iter()
+                .map(|row| extract_expected(row).clone())
                 .collect();
-            let expected_values: Vec<Option<String>> =
-                values.iter().map(|c| c.str.clone()).collect();
+
             assert_eq!(expected_values, read_values);
         }
         Ok(())
     }
 
     #[test]
+    fn test_read_for_field_optional_string() -> errors::Result<()> {
+        let values = get_rows();
+        test_read_any_scalar_column::<parquet::data_type::ByteArrayType, String, _, _, _>(
+            &values,
+            "str_field",
+            read_string_column,
+            |r| r.str.clone(),
+            &StringReader,
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn test_read_for_field_list_of_optional_string_field() -> errors::Result<()> {
-        let values: Vec<StrBuilderRow> = get_str_values();
-        let mut builder = StrBuilder::new();
-        for v in &values {
-            builder.append(v)?;
-        }
+        let values = get_rows();
+        test_read_any_list_column::<parquet::data_type::ByteArrayType, String, _, _, _>(
+            &values,
+            "list_str_field",
+            read_string_column,
+            |r| &r.list_str,
+            &StringListReader, // the trait implementation for list<utf8>
+        )?;
+        Ok(())
+    }
 
-        let temp_file = NamedTempFile::with_suffix(".parquet")?;
-        let path = temp_file.path();
-        let _md = create_parquet(temp_file.as_file(), Box::new(builder))?;
+    #[test]
+    fn test_read_for_field_optional_i64() -> errors::Result<()> {
+        let values = get_rows();
+        test_read_any_scalar_column::<parquet::data_type::Int64Type, i64, _, _, _>(
+            &values,
+            "i64_field",
+            read_i64_column,
+            |r| r.i64,
+            &PrimitiveReader::<Int64Type>(PhantomData),
+        )?;
+        Ok(())
+    }
 
-        let file = File::open(path)?;
-        let reader = SerializedFileReader::new(file)?;
-        let schema = parquet_metadata_to_arrow_schema(reader.metadata());
-
-        let rg = reader.get_row_group(0)?;
-
-        let str_field_col = schema.column_with_name("list_str_field").unwrap();
-        let str_field_col_desc: &ColumnDescriptor =
-            rg.metadata().column(str_field_col.0).column_descr();
-
-        for batch_size in 1..=values.len() {
-            let col_rdr = get_typed_column_reader::<parquet::data_type::ByteArrayType>(
-                rg.get_column_reader(str_field_col.0)?,
-            );
-            let read_data = read_string_column(col_rdr, str_field_col_desc, batch_size)?;
-            let read_list = read_data.as_list::<i32>();
-            let mut idx: usize = 0;
-            for r in read_list.iter() {
-                let arr = r.unwrap();
-                let str_arr = arr.as_string::<i32>();
-                let read: Vec<Option<String>> =
-                    str_arr.iter().map(|c| c.map(|x| x.to_owned())).collect();
-
-                let expected = &values[idx].list_str;
-                assert_eq!(*expected, read);
-                idx += 1;
-            }
-        }
+    #[test]
+    fn test_read_for_field_list_of_optional_i64_field() -> errors::Result<()> {
+        let values = get_rows();
+        test_read_any_list_column::<parquet::data_type::Int64Type, i64, _, _, _>(
+            &values,
+            "list_i64_field",
+            read_i64_column_old,
+            |r| &r.list_i64,
+            &PrimitiveListReader::<Int64Type>(PhantomData),
+        )?;
         Ok(())
     }
 }
