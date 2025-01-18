@@ -113,7 +113,7 @@ where
     let mut def_levels = Vec::new();
     let mut rep_levels = Vec::new();
     let mut values = Vec::new();
-    let mut rows = 0;
+    let mut total_records_read = 0;
 
     loop {
         def_levels.clear();
@@ -128,8 +128,11 @@ where
         )?;
         println!("rep_levels: {:?}", rep_levels);
         println!("values: {:?}", values);
-        println!("records_read: {records_read}, values_read: {values_read}, levels_read: {levels_read}");
+        println!(
+            "records_read: {records_read}, values_read: {values_read}, levels_read: {levels_read}"
+        );
         if records_read == 0 && values_read == 0 && levels_read == 0 {
+            list_builder.append(true);
             let array = list_builder.finish();
             println!("array: {:?}", array);
             return Ok(Box::new(array));
@@ -140,9 +143,8 @@ where
             let dl = def_levels[i];
             let rl = rep_levels[i];
 
-            if rl == 0 && (val_idx > 0 || rows > 0) {
+            if rl == 0 && (val_idx > 0 || total_records_read > 0) {
                 list_builder.append(true);
-                rows += 1;
             }
 
             if dl == max_def_level {
@@ -154,6 +156,7 @@ where
                 // println!("Unexpected def_level: {dl}");
             }
         }
+        total_records_read += records_read;
     }
 }
 
@@ -209,104 +212,16 @@ pub fn read_f64_column(
     )
 }
 
-
-pub fn read_i64_column_old(
-    mut typed_rdr: ColumnReaderImpl<Int64Type>,
-    col_desc: &ColumnDescriptor,
-    batch_size: usize,
-) -> errors::Result<Box<dyn Array>> {
-    let is_simple_column = col_desc.max_rep_level() == 0;
-    if is_simple_column {
-        let mut def_levels = vec![];
-        let mut values: Vec<<Int64Type as DataType>::T> = vec![];
-        let mut builder: Int64Builder = Int64Builder::new();
-        loop {
-            values.clear();
-            def_levels.clear();
-            let (records_read, values_read, levels_read) =
-                typed_rdr.read_records(batch_size, Some(&mut def_levels), None, &mut values)?;
-            if records_read == 0 && values_read == 0 && levels_read == 0 {
-                return Ok(Box::new(builder.finish()));
-            }
-            let mut v_idx: usize = 0;
-            for i in 0..levels_read {
-                if def_levels[i] == 0 {
-                    builder.append_null();
-                } else {
-                    let s = values[v_idx];
-                    builder.append_value(s);
-                    v_idx += 1;
-                }
-            }
-        }
-    } else {
-        let mut def_levels = vec![];
-        let mut rep_levels = vec![];
-        let mut values: Vec<<Int64Type as DataType>::T> = vec![];
-        let mut builder = ListBuilder::new(Int64Builder::new());
-        let mut rows: usize = 0;
-        let max_def_level = col_desc.max_def_level();
-        let opt_def_level = max_def_level - 1;
-        println!("max_def_level: {max_def_level}, opt_def_level: {opt_def_level}");
-        println!("def_levels: {:?}", def_levels);
-        loop {
-            let mut v_idx: usize = 0;
-            values.clear();
-            def_levels.clear();
-            rep_levels.clear();
-            let (records_read, values_read, levels_read) = typed_rdr.read_records(
-                batch_size,
-                Some(&mut def_levels),
-                Some(&mut rep_levels),
-                &mut values,
-            )?;
-            println!(
-                "def_levels: {}, rep_levels: {}",
-                def_levels.len(),
-                rep_levels.len()
-            );
-            println!("rep_levels: {:?}", rep_levels);
-            println!("values: {:?}", values);
-            println!("records_read: {records_read}, values_read: {values_read}, levels_read: {levels_read}");
-            if records_read == 0 && values_read == 0 && levels_read == 0 {
-                let array = builder.finish();
-                println!("array: {:?}", array);
-                return Ok(Box::new(array));
-            }
-            for idx in 0..rep_levels.len() {
-                let def_level = def_levels[idx];
-                let rep_level = rep_levels[idx];
-                if rep_level == 0 && (v_idx > 0 || rows > 0) {
-                    builder.append(true);
-                    rows += 1;
-                }
-                if def_level == max_def_level {
-                    let s = values[v_idx];
-                    builder.values().append_value(s);
-                    v_idx += 1;
-                } else if def_level == opt_def_level {
-                    builder.values().append_null();
-                } else {
-                    panic!("{}", def_level);
-                }
-            }
-            // println!("builder: {}", builder.len());
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::columns_builder::ColumnsBuilder;
     use crate::errors;
     use crate::schema::parquet_metadata_to_arrow_schema;
-    use crate::vec_pq_reader::{read_i64_column, read_i64_column_old, read_string_column};
+    use crate::vec_pq_reader::{read_i64_column, read_string_column};
     use arrow::array::{
         Array, ArrayRef, AsArray, Int64Builder, ListBuilder, RecordBatch, StringBuilder,
     };
-    use arrow::datatypes::{
-        ArrowPrimitiveType, ByteArrayType, DataType, Field, Int64Type, Schema, Utf8Type,
-    };
+    use arrow::datatypes::{ArrowPrimitiveType, DataType, Field, Int64Type, Schema};
     use arrow::error::ArrowError;
     use parquet::arrow::arrow_writer::ArrowWriterOptions;
     use parquet::arrow::ArrowWriter;
@@ -646,10 +561,11 @@ mod tests {
             let col_reader = rg.get_column_reader(field_index)?;
             let typed_reader = get_typed_column_reader::<ParquetT>(col_reader);
             let array = read_fn(typed_reader, field_desc, batch_size)?;
+            assert!(array.len() > 0);
 
             // The trait does the conversion to Vec<Vec<Option<RustVal>>>
             let read_values: Vec<Vec<Option<T>>> = list_rdr.to_list_vec(&*array);
-            println!("read_values: {:?}", read_values);
+            assert!(read_values.len() > 0);
 
             // Compare with the "expected" data from `TestBuilderRow`
             let expected_values: Vec<Vec<Option<T>>> = values
@@ -707,7 +623,7 @@ mod tests {
         test_read_any_list_column::<parquet::data_type::Int64Type, i64, _, _, _>(
             &values,
             "list_i64_field",
-            read_i64_column_old,
+            read_i64_column,
             |r| &r.list_i64,
             &PrimitiveListReader::<Int64Type>(PhantomData),
         )?;
