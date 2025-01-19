@@ -5,9 +5,13 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+#[cfg(target_env = "msvc")]
+#[global_allocator]
+static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
+
 use arrow::array::Array;
 use arrow::datatypes::DataType;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use parquet::column::reader::get_typed_column_reader;
 use parquet::data_type::{ByteArrayType, DoubleType, Int64Type};
 use parquet::file::reader::{FileReader, SerializedFileReader};
@@ -20,12 +24,23 @@ use std::fs::File;
 use std::time::Instant;
 use tracing::info;
 
+#[derive(ValueEnum, Clone, Debug)]
+pub enum ParquetReaderType {
+    /// Use RowByRow Parquet reader, `RowIter`
+    RowByRow,
+    /// Use `GenericColumnReader` to read the whole column
+    Columnar,
+}
+
 #[derive(Parser, Debug, Clone)]
 #[clap()]
 struct AppArgs {
     /// Input path to Parquet
     #[clap(long)]
     input_parquet_file_path: String,
+    /// The type of Parquet reader
+    #[clap(long)]
+    parquet_reader_type: ParquetReaderType,
 }
 
 fn main() -> errors::Result<()> {
@@ -38,8 +53,19 @@ fn main() -> errors::Result<()> {
     let t: Instant = Instant::now();
     let mut total: usize = 0;
     for _i in 0..ITERS {
-        let xs = read_parquet_v2(args.input_parquet_file_path.as_str())?;
-        total += xs.len();
+        match args.parquet_reader_type {
+            ParquetReaderType::RowByRow => {
+                let xs = read_parquet(args.input_parquet_file_path.as_str())?;
+                total += xs.len();
+            }
+            ParquetReaderType::Columnar => {
+                let arrays = read_parquet_v2(args.input_parquet_file_path.as_str())?;
+                // The first column is not a List, so we use it to calculate the total number of rows
+                arrays.first().iter().for_each(|arr| {
+                    total += arr.len();
+                });
+            }
+        };
     }
     let total_elapsed_ms = t.elapsed().as_millis() as f64;
     let avg = total_elapsed_ms / ITERS as f64;
@@ -50,16 +76,11 @@ fn main() -> errors::Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
 fn read_parquet(path: &str) -> Result<Vec<Row>, AppError> {
     let f = File::open(path)?;
     let reader = SerializedFileReader::new(f)?;
     let mut xs: Vec<Row> = Vec::new();
-    let t: Instant = Instant::now();
     let iter = reader.into_iter();
-    let total_elapsed_ms = t.elapsed().as_millis() as f64;
-    info!("into_iter is {total_elapsed_ms} ms");
-
     for maybe_row in iter {
         let row = maybe_row?;
         xs.push(row);

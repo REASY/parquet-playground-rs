@@ -461,6 +461,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f46ad14479a25103f283c0f10005961cf086d8dc42205bb44c46ac563475dca6"
 
 [[package]]
+name = "cmake"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c682c223677e0e5b6b7f63a64b9351844c3f1b1678a68b7ee617e30fb082620e"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -941,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "parquet-playground-rs"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "arrow",
  "chrono",
@@ -950,6 +959,7 @@ dependencies = [
  "parquet",
  "serde",
  "serde_json",
+ "snmalloc-rs",
  "tempfile",
  "thiserror",
  "tikv-jemallocator",
@@ -1105,9 +1115,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.135"
+version = "1.0.136"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b0d7ba2887406110130a978386c4e1befb98c674b4fba677954e4db976630d9"
+checksum = "336a0c23cf42a38d9eaa7cd22c7040d04e1228a19a933890805ffd00a16437d2"
 dependencies = [
  "itoa",
  "memchr",
@@ -1141,6 +1151,24 @@ name = "snap"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
+
+[[package]]
+name = "snmalloc-rs"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d43ff92911d7d9705d1c0203300a3edfd00d16c8b8b0c27c56f9407a3f31e7a6"
+dependencies = [
+ "snmalloc-sys",
+]
+
+[[package]]
+name = "snmalloc-sys"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "954e1f984860770475196be81a547ed1517d34fcb8a15cb87bdb37cff3353230"
+dependencies = [
+ "cmake",
+]
 
 [[package]]
 name = "static_assertions"

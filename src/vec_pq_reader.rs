@@ -1,5 +1,6 @@
 use crate::errors;
 use arrow::array::{Array, ArrayBuilder, Float64Builder, Int64Builder, ListBuilder, StringBuilder};
+use arrow::error::ArrowError;
 use parquet::column::reader::ColumnReaderImpl;
 use parquet::data_type::{ByteArrayType, DataType, DoubleType, Int64Type};
 use parquet::schema::types::ColumnDescriptor;
@@ -91,6 +92,7 @@ where
     }
 }
 
+#[inline(never)]
 fn read_repeated_column<T, B, A, F>(
     mut typed_rdr: ColumnReaderImpl<T>,
     col_desc: &ColumnDescriptor,
@@ -104,16 +106,23 @@ where
     A: Fn(&T::T, &mut B) -> errors::Result<()>,
     F: Fn() -> B,
 {
-    let max_def_level = col_desc.max_def_level();
-    let opt_def_level = max_def_level.saturating_sub(1);
-
+    // Sanity checks for a List<OPTIONAL T> as described:
+    assert_eq!(
+        col_desc.max_rep_level(),
+        1,
+        "Expected repeated=1 for a List column"
+    );
+    assert_eq!(
+        col_desc.max_def_level(),
+        3,
+        "Expected def levels=0..3 for List<OPTIONAL T>"
+    );
     let inner_builder = factory_fn();
     let mut list_builder = ListBuilder::new(inner_builder);
 
     let mut def_levels = Vec::new();
     let mut rep_levels = Vec::new();
     let mut values = Vec::new();
-    let mut total_records_read = 0;
 
     loop {
         def_levels.clear();
@@ -128,30 +137,95 @@ where
         )?;
 
         if records_read == 0 && values_read == 0 && levels_read == 0 {
-            list_builder.append(true);
             let array = list_builder.finish();
             return Ok(Box::new(array));
         }
 
-        let mut val_idx = 0;
-        for i in 0..levels_read {
-            let dl = def_levels[i];
-            let rl = rep_levels[i];
+        // We'll track if we're currently building a row and store its items
+        let mut in_row = false;
+        let mut v_idx = 0;
 
-            if rl == 0 && (val_idx > 0 || total_records_read > 0) {
-                list_builder.append(true);
-            }
+        let def_levels = &def_levels[0..levels_read];
+        let rep_levels = &rep_levels[0..levels_read];
 
-            if dl == max_def_level {
-                append_fn(&values[val_idx], list_builder.values())?;
-                val_idx += 1;
-            } else if dl == opt_def_level {
-                list_builder.values().append_null_value();
+        for i in 0..def_levels.len() {
+            let def = def_levels[i];
+            let rep = rep_levels[i];
+
+            if rep == 0 {
+                // We are starting a new top-level row
+                // => finalize the *previous* row if it was open
+                if in_row {
+                    // we had appended child items for the previous row
+                    list_builder.append(true);
+                    in_row = false;
+                }
+
+                match def {
+                    0 => {
+                        // def_level=0 => entire top-level list is NULL
+                        list_builder.append(false);
+                    }
+                    1 => {
+                        // def_level=1 => non-null but *empty* list
+                        list_builder.append(true);
+                        in_row = false;
+                    }
+                    2 => {
+                        // def_level=2 => list is present, item is NULL
+                        list_builder.values().append_null_value();
+                        in_row = true;
+                    }
+                    3 => {
+                        // def_level=3 => list is present, item is non-null
+                        append_fn(&values[v_idx], list_builder.values())?;
+                        v_idx += 1;
+                        in_row = true;
+                    }
+                    _ => {
+                        return Err(ArrowError::InvalidArgumentError(format!(
+                            "Unexpected def_level={} for column {}",
+                            def,
+                            col_desc.path()
+                        ))
+                        .into());
+                    }
+                }
             } else {
-                panic!("Unexpected def_level: {dl}");
+                match def {
+                    0 => {
+                        // def_level=0 => entire top-level list is NULL
+                        list_builder.append(false);
+                    }
+                    1 => {
+                        // def_level=1 => non-null but *empty* list
+                        list_builder.append(true);
+                    }
+                    2 => {
+                        // def_level=2 => list is present, item is NULL
+                        list_builder.values().append_null_value();
+                    }
+                    3 => {
+                        // def_level=3 => list is present, item is non-null
+                        append_fn(&values[v_idx], list_builder.values())?;
+                        v_idx += 1;
+                    }
+                    _ => {
+                        return Err(ArrowError::InvalidArgumentError(format!(
+                            "Unexpected def_level={} for column {}",
+                            def,
+                            col_desc.path()
+                        ))
+                        .into());
+                    }
+                }
             }
         }
-        total_records_read += records_read;
+
+        // If we ended while "in_row = true", finalize that row
+        if in_row {
+            list_builder.append(true);
+        }
     }
 }
 
@@ -207,12 +281,84 @@ pub fn read_f64_column(
     )
 }
 
+#[allow(dead_code)]
+fn decode_list_of_i64(
+    def_levels: &[i16],
+    rep_levels: &[i16],
+    values: &[i64],
+    max_def_level: i16,
+) -> ListBuilder<Int64Builder> {
+    let mut builder = ListBuilder::new(Int64Builder::new());
+    let mut v_idx = 0;
+
+    // We'll track if we're currently building a row and store its items
+    let mut in_row = false;
+
+    for i in 0..def_levels.len() {
+        let def = def_levels[i];
+        let rep = rep_levels[i];
+
+        if rep == 0 {
+            // We are starting a new top-level row
+            // => finalize the *previous* row if it was open
+            if in_row {
+                // we had appended child items for the previous row
+                builder.append(true);
+                in_row = false;
+            }
+
+            if def == 0 {
+                // This entire row is NULL
+                builder.append(false);
+            } else {
+                // This row is non-null => we will collect child items
+                in_row = true;
+                if def == 3 {
+                    // e.g. def=3 => non-null item
+                    builder.values().append_value(values[v_idx]);
+                    v_idx += 1;
+                } else if def == 2 {
+                    // e.g. def=1..(max_def_level-1) => item null
+                    builder.values().append_null();
+                } else if def == 1 {
+                    // e.g. def=1..(max_def_level-1) => item null
+                    builder.append(true);
+                    in_row = false;
+                }
+            }
+        } else {
+            // rep>0 => continuing the same row
+            if def == max_def_level {
+                // item non-null
+                builder.values().append_value(values[v_idx]);
+                v_idx += 1;
+            } else if def == 2 {
+                // e.g. def=1..(max_def_level-1) => item null
+                builder.values().append_null();
+            } else if def == 1 {
+                // e.g. def=1..(max_def_level-1) => item null
+                builder.append(true);
+                in_row = false;
+            }
+        }
+    }
+
+    // If we ended while "in_row = true", finalize that row
+    if in_row {
+        builder.append(true);
+    }
+
+    builder
+}
+
 #[cfg(test)]
 mod tests {
     use crate::columns_builder::ColumnsBuilder;
     use crate::errors;
     use crate::schema::parquet_metadata_to_arrow_schema;
-    use crate::vec_pq_reader::{read_f64_column, read_i64_column, read_string_column};
+    use crate::vec_pq_reader::{
+        decode_list_of_i64, read_f64_column, read_i64_column, read_string_column,
+    };
     use arrow::array::{
         Array, ArrayRef, AsArray, Float64Builder, Int64Builder, ListBuilder, RecordBatch,
         StringBuilder,
@@ -266,24 +412,24 @@ mod tests {
     #[derive(Clone)]
     pub struct TestBuilderRow {
         str: Option<String>,
-        list_str: Vec<Option<String>>,
+        list_str: Option<Vec<Option<String>>>,
         i64: Option<i64>,
-        list_i64: Vec<Option<i64>>,
+        list_i64: Option<Vec<Option<i64>>>,
         f64: Option<f64>,
-        list_f64: Vec<Option<f64>>,
+        list_f64: Option<Vec<Option<f64>>>,
     }
 
     impl TestBuilderRow {
         fn new(
             str: Option<&str>,
-            str_list: Vec<Option<&str>>,
+            str_list: Option<Vec<Option<&str>>>,
             i64: Option<i64>,
-            list_i64: Vec<Option<i64>>,
+            list_i64: Option<Vec<Option<i64>>>,
             f64: Option<f64>,
-            list_f64: Vec<Option<f64>>,
+            list_f64: Option<Vec<Option<f64>>>,
         ) -> Self {
-            let list_str: Vec<Option<String>> =
-                str_list.iter().map(|x| x.map(|c| c.to_owned())).collect();
+            let list_str: Option<Vec<Option<String>>> =
+                str_list.map(|v| v.iter().map(|x| x.map(|c| c.to_owned())).collect());
             TestBuilderRow {
                 str: str.map(|x| x.to_owned()),
                 list_str,
@@ -350,11 +496,13 @@ mod tests {
 
         fn append(&mut self, msg: &'a Self::T) -> Result<(), ArrowError> {
             self.str_field.append_option(msg.str.clone());
-            self.list_str_field.append_value(msg.list_str.clone());
+            self.list_str_field.append_option(msg.list_str.clone());
+
             self.i64_field.append_option(msg.i64);
-            self.list_i64_field.append_value(msg.list_i64.clone());
+            self.list_i64_field.append_option(msg.list_i64.clone());
+
             self.f64_field.append_option(msg.f64);
-            self.list_f64_field.append_value(msg.list_f64.clone());
+            self.list_f64_field.append_option(msg.list_f64.clone());
             Ok(())
         }
 
@@ -371,11 +519,12 @@ mod tests {
 
     fn get_rows() -> Vec<TestBuilderRow> {
         vec![
+            TestBuilderRow::new(None, None, None, None, None, None),
             TestBuilderRow::new(
                 None,
-                vec![None, Some("1"), None, Some("2")],
+                Some(vec![None, Some("1"), None, Some("2")]),
                 Some(0),
-                vec![
+                Some(vec![
                     Some(1),
                     Some(0),
                     Some(2),
@@ -383,85 +532,100 @@ mod tests {
                     Some(-2),
                     Some(i64::MAX),
                     Some(i64::MIN),
-                ],
+                ]),
                 None,
-                vec![
+                Some(vec![
                     Some(0.0),
                     Some(1.0),
                     Some(-1.0),
                     Some(f64::MAX),
                     Some(f64::MIN),
                     None,
-                ],
+                ]),
             ),
             TestBuilderRow::new(
                 None,
-                vec![Some("3"), Some("4"), None, Some("5")],
+                Some(vec![Some("3"), Some("4"), None, Some("5")]),
                 Some(i64::MAX),
-                vec![Some(4)],
+                Some(vec![Some(4)]),
                 Some(f64::MAX),
-                vec![None, None, None, None],
+                Some(vec![None, None, None, None]),
             ),
             TestBuilderRow::new(
                 Some("hello"),
-                vec![None, None],
+                Some(vec![None, None]),
                 Some(i64::MIN),
-                vec![None, None, None, None, None],
+                Some(vec![None, None, None, None, None]),
                 Some(f64::MIN),
-                vec![
+                Some(vec![
                     Some(-123.456),
                     Some(-456.789),
                     Some(123.456),
                     Some(456.789),
                     Some(0.0),
-                ],
+                ]),
             ),
             TestBuilderRow::new(
                 Some("world"),
-                vec![Some("6"), Some("7")],
+                Some(vec![Some("6"), Some("7")]),
                 Some(6),
-                vec![Some(7), Some(8), Some(8), Some(8), Some(8)],
+                Some(vec![Some(7), Some(8), Some(8), Some(8), Some(8)]),
                 Some(f64::MIN),
-                vec![
+                Some(vec![
                     Some(-5.0),
                     Some(5.0),
                     Some(5.5),
                     None,
                     None,
                     Some(6.0123456),
-                ],
+                ]),
             ),
             TestBuilderRow::new(
                 None,
-                vec![None],
+                Some(vec![None]),
                 None,
-                vec![Some(10), Some(11), Some(12), Some(13), Some(14)],
+                Some(vec![Some(10), Some(11), Some(12), Some(13), Some(14)]),
                 Some(1.0),
-                vec![None, None, None, Some(100.0), Some(200.0), Some(300.0)],
+                Some(vec![
+                    None,
+                    None,
+                    None,
+                    Some(100.0),
+                    Some(200.0),
+                    Some(300.0),
+                ]),
             ),
             TestBuilderRow::new(
                 None,
-                vec![None],
+                Some(vec![None]),
                 None,
-                vec![None, Some(15)],
+                Some(vec![None, Some(15)]),
                 Some(0.0),
-                vec![None, None, None],
+                Some(vec![None, None, None]),
             ),
             TestBuilderRow::new(
                 Some("from"),
-                vec![Some("8"), Some("9"), None, None, Some("10")],
+                Some(vec![Some("8"), Some("9"), None, None, Some("10")]),
                 None,
-                vec![Some(16), Some(17)],
+                Some(vec![Some(16), Some(17)]),
                 Some(123456789.01),
-                vec![Some(0.0), Some(1.0), Some(2.0)],
+                Some(vec![Some(0.0), Some(1.0), Some(2.0)]),
             ),
             TestBuilderRow::new(
                 Some("Rust"),
-                vec![None, None, None, None, None, Some("12")],
+                Some(vec![None, None, None, None, None, Some("12")]),
                 Some(18),
-                vec![None, None, Some(19), Some(20)],
+                Some(vec![None, None, Some(19), Some(20)]),
                 Some(f64::EPSILON),
-                vec![Some(f64::EPSILON), Some(f64::EPSILON), Some(f64::MIN)],
+                Some(vec![Some(f64::EPSILON), Some(f64::EPSILON), Some(f64::MIN)]),
+            ),
+            TestBuilderRow::new(
+                Some("Empty"),
+                Some(vec![]),
+                Some(19),
+                Some(vec![]),
+                Some(3.14),
+                Some(vec![]),
             ),
         ]
     }
@@ -489,39 +653,60 @@ mod tests {
     }
 
     trait ListReader<T> {
-        fn to_list_vec(&self, array: &dyn Array) -> Vec<Vec<Option<T>>>;
+        fn to_list_vec(&self, array: &dyn Array) -> Vec<Option<Vec<Option<T>>>>;
     }
 
     pub struct PrimitiveListReader<A: ArrowPrimitiveType>(pub PhantomData<A>);
     impl<A: ArrowPrimitiveType> ListReader<A::Native> for PrimitiveListReader<A> {
-        fn to_list_vec(&self, array: &dyn Array) -> Vec<Vec<Option<A::Native>>> {
+        #[inline(never)]
+        fn to_list_vec(&self, array: &dyn Array) -> Vec<Option<Vec<Option<A::Native>>>> {
             let list_array = array.as_list::<i32>();
-            (0..list_array.len())
-                .map(|idx| {
-                    // Downcast the sub-array to the actual primitive array
-                    let sub_array = list_array.value(idx);
+            let mut xs: Vec<Option<Vec<Option<A::Native>>>> = Vec::new();
+            for idx in 0..list_array.len() {
+                if list_array.is_null(idx) {
+                    xs.push(None);
+                    continue;
+                }
+                let sub_array = list_array.value(idx);
+                if sub_array.is_empty() {
+                    xs.push(Some(vec![]));
+                } else {
                     let typed_sub_array = sub_array.as_primitive::<A>();
-                    // Collect each element as Option<A::Native>
-                    typed_sub_array.iter().collect()
-                })
-                .collect()
+                    let arr: Vec<Option<A::Native>> = typed_sub_array
+                        .iter()
+                        .map(|opt_str| opt_str.map(|s| s.to_owned()))
+                        .collect();
+                    xs.push(Some(arr));
+                }
+            }
+            xs
         }
     }
 
     pub struct StringListReader;
     impl ListReader<String> for StringListReader {
-        fn to_list_vec(&self, array: &dyn Array) -> Vec<Vec<Option<String>>> {
+        #[inline(never)]
+        fn to_list_vec(&self, array: &dyn Array) -> Vec<Option<Vec<Option<String>>>> {
             let list_array = array.as_list::<i32>();
-            (0..list_array.len())
-                .map(|idx| {
-                    let sub_array = list_array.value(idx);
+            let mut xs: Vec<Option<Vec<Option<String>>>> = Vec::new();
+            for idx in 0..list_array.len() {
+                if list_array.is_null(idx) {
+                    xs.push(None);
+                    continue;
+                }
+                let sub_array = list_array.value(idx);
+                if sub_array.is_empty() {
+                    xs.push(Some(vec![]));
+                } else {
                     let typed_sub_array = sub_array.as_string::<i32>();
-                    typed_sub_array
+                    let arr: Vec<Option<String>> = typed_sub_array
                         .iter()
                         .map(|opt_str| opt_str.map(|s| s.to_owned()))
-                        .collect()
-                })
-                .collect()
+                        .collect();
+                    xs.push(Some(arr));
+                }
+            }
+            xs
         }
     }
 
@@ -598,6 +783,7 @@ mod tests {
         Ok(())
     }
 
+    #[inline(never)]
     fn test_read_any_list_column<ParquetT, T, E, R, S>(
         values: &[TestBuilderRow],
         field_name: &str,
@@ -612,7 +798,7 @@ mod tests {
             &ColumnDescriptor,
             usize,
         ) -> errors::Result<Box<dyn Array>>,
-        E: Fn(&TestBuilderRow) -> &Vec<Option<T>>,
+        E: Fn(&TestBuilderRow) -> &Option<Vec<Option<T>>>,
         T: PartialEq + std::fmt::Debug + Clone + std::fmt::Display,
         S: ListReader<T>,
     {
@@ -633,11 +819,11 @@ mod tests {
             assert!(array.len() > 0);
 
             // The trait does the conversion to Vec<Vec<Option<RustVal>>>
-            let read_values: Vec<Vec<Option<T>>> = list_rdr.to_list_vec(&*array);
+            let read_values: Vec<Option<Vec<Option<T>>>> = list_rdr.to_list_vec(&*array);
             assert!(read_values.len() > 0);
 
             // Compare with the "expected" data from `TestBuilderRow`
-            let expected_values: Vec<Vec<Option<T>>> = values
+            let expected_values: Vec<Option<Vec<Option<T>>>> = values
                 .iter()
                 .map(|row| extract_expected(row).clone())
                 .collect();
@@ -722,5 +908,22 @@ mod tests {
             &PrimitiveListReader::<Float64Type>(PhantomData),
         )?;
         Ok(())
+    }
+    #[test]
+    fn test_gpt() {
+        let def_levels = [0, 1];
+        let rep_levels = [0, 0];
+        let values = [];
+
+        let max_def_level = 3;
+        let mut list_builder = decode_list_of_i64(&def_levels, &rep_levels, &values, max_def_level);
+        let list_array = list_builder.finish();
+
+        // Now `list_array` has 2 rows:
+        //   row0 => NULL
+        //   row1 => [1, 0, 2, -1, -2, 9223372036854775807, -9223372036854775808]
+
+        // Print debug:
+        println!("{:?}", list_array);
     }
 }
