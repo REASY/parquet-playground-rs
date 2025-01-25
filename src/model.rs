@@ -7,7 +7,7 @@ pub struct Series {
     #[serde(rename = "sumsDouble")]
     pub sums_double: Vec<Option<f64>>,
     #[serde(rename = "sumsLong")]
-    pub sums_long: Vec<i64>,
+    pub sums_long: Vec<Option<i64>>,
     pub count: Vec<i64>,
 }
 

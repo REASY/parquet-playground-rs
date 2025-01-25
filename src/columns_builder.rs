@@ -78,7 +78,7 @@ impl<'a> ColumnsBuilder<'a> for Builders {
         }
         Self::append_to_i64(msg.ts.as_slice(), &mut self.ts);
         Self::append_to_f64(msg.sums_double.as_slice(), &mut self.sums_double);
-        Self::append_to_i64(msg.sums_long.as_slice(), &mut self.sums_long);
+        Self::append_to_i64_opt(msg.sums_long.as_slice(), &mut self.sums_long);
         Self::append_to_i64(msg.count.as_slice(), &mut self.count);
         Ok(())
     }
@@ -121,6 +121,11 @@ impl Builders {
 
     fn append_to_i64(values: &[i64], builder: &mut ListBuilder<Int64Builder>) {
         let vals: Vec<Option<i64>> = values.iter().map(|x| Some(*x)).collect();
+        builder.append_value(vals);
+    }
+
+    fn append_to_i64_opt(values: &[Option<i64>], builder: &mut ListBuilder<Int64Builder>) {
+        let vals: Vec<Option<i64>> = values.iter().map(|x| x.to_owned()).collect();
         builder.append_value(vals);
     }
 
