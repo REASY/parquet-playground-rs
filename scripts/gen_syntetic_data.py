@@ -194,9 +194,12 @@ def generate_histograms(N, M, seed=42):
         tagValues = []
         for key in chosen_tag_keys:
             tagValues.append(generate_random_tag_value(key))
-        
 
-        
+        valid_chosen_tag_keys = []
+        for t in chosen_tag_keys:
+            # Apache Parquet Avro does not like `.`  in the column name, use `_` instead
+            valid_chosen_tag_keys.append(t.replace(".", "_"))
+
         # Initialize cumulative counters
         cumulative_count = 0
         cumulative_sum = 0
@@ -230,10 +233,10 @@ def generate_histograms(N, M, seed=42):
             count_list.append(cumulative_count)
             
             # Move to the next ts
-            current_time_ms += 100
+            current_time_ms += 1000
         
         histograms.append({
-            "tags": chosen_tag_keys.copy(),
+            "tags": valid_chosen_tag_keys,
             "tagValues": tagValues,
             "ts": ts_list,
             "sumsDouble": sums_double_list,

@@ -37,6 +37,8 @@ struct AppArgs {
     /// Controls statistics for Parquet
     #[clap(long)]
     statistics_mode: StatisticsMode,
+    #[clap(long, default_value_t = false)]
+    hexify_tag_columns: bool,
 }
 
 fn main() -> errors::Result<()> {
@@ -56,7 +58,11 @@ fn main() -> errors::Result<()> {
         });
         let mut xs: Vec<&str> = all_tags.iter().copied().collect();
         xs.sort();
-        xs.iter().map(|c| Builders::as_hex(c)).collect()
+        if args.hexify_tag_columns {
+            xs.iter().map(|c| Builders::as_hex(c)).collect()
+        } else {
+            xs.iter().map(|c| c.to_string()).collect()
+        }
     };
     info!(
         "`{}` with {} series, total number of tags: {}",
@@ -64,7 +70,7 @@ fn main() -> errors::Result<()> {
         metric.series.len(),
         all_tags.len()
     );
-    let mut builders = Builders::new(all_tags.as_slice());
+    let mut builders = Builders::new(all_tags.as_slice(), args.hexify_tag_columns);
     let schema = builders.schema.clone();
     for s in &metric.series {
         builders.append(s)?;

@@ -20,8 +20,9 @@ pub trait ColumnsBuilder<'a> {
 }
 
 pub struct Builders {
+    hexify_tag_columns: bool,
     pub schema: Arc<Schema>,
-    hex_tag_fields: HashMap<String, StringBuilder>,
+    tag_fields: HashMap<String, StringBuilder>,
     ts: ListBuilder<Int64Builder>,
     sums_double: ListBuilder<Float64Builder>,
     sums_long: ListBuilder<Int64Builder>,
@@ -41,7 +42,7 @@ impl<'a> ColumnsBuilder<'a> for Builders {
         for f in self.schema.fields() {
             if *f.data_type() == DataType::Utf8 {
                 let column = f.name().as_str();
-                let str_builder = self.hex_tag_fields.get_mut(column).unwrap();
+                let str_builder = self.tag_fields.get_mut(column).unwrap();
                 columns.push(Arc::new(str_builder.finish()));
             }
         }
@@ -56,21 +57,29 @@ impl<'a> ColumnsBuilder<'a> for Builders {
         let mut used_buffers: HashSet<String> = HashSet::new();
         let mut i: usize = 0;
         while i < msg.tags.len() {
-            let tag_hex = {
+            let tag = {
                 let tag: &str = msg.tags[i].as_ref();
-                Self::as_hex(tag)
+                if self.hexify_tag_columns {
+                    Self::as_hex(tag)
+                } else {
+                    tag.to_string()
+                }
             };
             let tag_value: String = msg.tag_values[i].clone();
-            let str_builder = self.hex_tag_fields.get_mut(tag_hex.as_str()).ok_or(
-                ArrowError::InvalidArgumentError(format!("Could not find tag {}", tag_hex)),
-            )?;
+            let str_builder =
+                self.tag_fields
+                    .get_mut(tag.as_str())
+                    .ok_or(ArrowError::InvalidArgumentError(format!(
+                        "Could not find tag {}",
+                        tag
+                    )))?;
             str_builder.append_value(tag_value);
 
-            used_buffers.insert(tag_hex);
+            used_buffers.insert(tag);
             i += 1;
         }
         let unused = self
-            .hex_tag_fields
+            .tag_fields
             .iter_mut()
             .filter(|(tag_hex, _)| !used_buffers.contains(tag_hex.as_str()));
         for (_, builder) in unused {
@@ -91,7 +100,7 @@ impl<'a> ColumnsBuilder<'a> for Builders {
             .filter(|x| *x.data_type() == DataType::Utf8)
             .map(|f| (f.name().to_owned(), StringBuilder::new()))
             .collect();
-        self.hex_tag_fields = hex_tag_fields;
+        self.tag_fields = hex_tag_fields;
         self.ts = ListBuilder::new(Int64Builder::new());
         self.sums_double = ListBuilder::new(Float64Builder::new());
         self.sums_long = ListBuilder::new(Int64Builder::new());
@@ -101,7 +110,7 @@ impl<'a> ColumnsBuilder<'a> for Builders {
 }
 
 impl Builders {
-    pub fn new(all_tags: &[String]) -> Builders {
+    pub fn new(all_tags: &[String], hexify_tag_columns: bool) -> Builders {
         let schema = ThisSchema::new(all_tags).schema;
         let hex_tag_fields: HashMap<String, StringBuilder> = schema
             .fields
@@ -110,8 +119,9 @@ impl Builders {
             .map(|f| (f.name().to_owned(), StringBuilder::new()))
             .collect();
         Builders {
+            hexify_tag_columns,
             schema: Arc::new(schema),
-            hex_tag_fields,
+            tag_fields: hex_tag_fields,
             ts: ListBuilder::new(Int64Builder::new()),
             sums_double: ListBuilder::new(Float64Builder::new()),
             sums_long: ListBuilder::new(Int64Builder::new()),

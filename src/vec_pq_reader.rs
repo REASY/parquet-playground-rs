@@ -47,7 +47,7 @@ where
     F: Fn() -> B,
 {
     if col_desc.max_rep_level() == 0 {
-        read_simple_column::<T, B, A, F>(typed_rdr, batch_size, append_fn, &factory_fn)
+        read_simple_column::<T, B, A, F>(typed_rdr, col_desc, batch_size, append_fn, &factory_fn)
     } else {
         read_repeated_column::<T, B, A, F>(typed_rdr, col_desc, batch_size, append_fn, &factory_fn)
     }
@@ -55,6 +55,7 @@ where
 
 fn read_simple_column<T, B, A, F>(
     mut typed_rdr: ColumnReaderImpl<T>,
+    col_desc: &ColumnDescriptor,
     batch_size: usize,
     append_fn: A,
     factory_fn: &F,
@@ -65,6 +66,11 @@ where
     A: Fn(&T::T, &mut B) -> errors::Result<()>,
     F: Fn() -> B,
 {
+    // Make sure it is not nested column
+    assert_eq!(col_desc.max_rep_level(), 0);
+    // Handle optional column
+    assert!(col_desc.max_def_level() <= 1);
+
     let mut def_levels = Vec::new();
     let mut values = Vec::new();
     let mut builder = factory_fn();
@@ -92,7 +98,6 @@ where
     }
 }
 
-#[inline(never)]
 fn read_repeated_column<T, B, A, F>(
     mut typed_rdr: ColumnReaderImpl<T>,
     col_desc: &ColumnDescriptor,
@@ -106,7 +111,6 @@ where
     A: Fn(&T::T, &mut B) -> errors::Result<()>,
     F: Fn() -> B,
 {
-    // Sanity checks for a List<OPTIONAL T> as described:
     assert_eq!(
         col_desc.max_rep_level(),
         1,
@@ -658,7 +662,6 @@ mod tests {
 
     pub struct PrimitiveListReader<A: ArrowPrimitiveType>(pub PhantomData<A>);
     impl<A: ArrowPrimitiveType> ListReader<A::Native> for PrimitiveListReader<A> {
-        #[inline(never)]
         fn to_list_vec(&self, array: &dyn Array) -> Vec<Option<Vec<Option<A::Native>>>> {
             let list_array = array.as_list::<i32>();
             let mut xs: Vec<Option<Vec<Option<A::Native>>>> = Vec::new();
@@ -685,7 +688,6 @@ mod tests {
 
     pub struct StringListReader;
     impl ListReader<String> for StringListReader {
-        #[inline(never)]
         fn to_list_vec(&self, array: &dyn Array) -> Vec<Option<Vec<Option<String>>>> {
             let list_array = array.as_list::<i32>();
             let mut xs: Vec<Option<Vec<Option<String>>>> = Vec::new();
@@ -783,7 +785,6 @@ mod tests {
         Ok(())
     }
 
-    #[inline(never)]
     fn test_read_any_list_column<ParquetT, T, E, R, S>(
         values: &[TestBuilderRow],
         field_name: &str,
@@ -910,7 +911,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn test_gpt() {
+    fn test_decode_list_of_i64() {
         let def_levels = [0, 1];
         let rep_levels = [0, 0];
         let values = [];
