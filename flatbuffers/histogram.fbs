@@ -1,0 +1,8 @@
+table Histogram {
+    ts: [int64];
+    count: [int64];
+    sums_double: [float64];
+    sums_long: [int64];
+}
+
+root_type Histogram;

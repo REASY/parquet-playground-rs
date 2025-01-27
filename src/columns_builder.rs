@@ -1,7 +1,8 @@
+use crate::flatbuffers::to_flatbuffers;
 use crate::model::Series;
 use crate::schema::ThisSchema;
 use arrow::array::{
-    ArrayRef, Float64Builder, Int64Builder, ListBuilder, RecordBatch, StringBuilder,
+    ArrayRef, BinaryBuilder, Float64Builder, Int64Builder, ListBuilder, RecordBatch, StringBuilder,
 };
 use arrow::datatypes::{DataType, Schema};
 use arrow::error::ArrowError;
@@ -21,12 +22,14 @@ pub trait ColumnsBuilder<'a> {
 
 pub struct Builders {
     hexify_tag_columns: bool,
+    use_flatbuffers: bool,
     pub schema: Arc<Schema>,
     tag_fields: HashMap<String, StringBuilder>,
     ts: ListBuilder<Int64Builder>,
     sums_double: ListBuilder<Float64Builder>,
     sums_long: ListBuilder<Int64Builder>,
     count: ListBuilder<Int64Builder>,
+    binary_data: BinaryBuilder,
 }
 
 impl<'a> ColumnsBuilder<'a> for Builders {
@@ -46,10 +49,14 @@ impl<'a> ColumnsBuilder<'a> for Builders {
                 columns.push(Arc::new(str_builder.finish()));
             }
         }
-        columns.push(Arc::new(self.ts.finish()));
-        columns.push(Arc::new(self.sums_double.finish()));
-        columns.push(Arc::new(self.sums_long.finish()));
-        columns.push(Arc::new(self.count.finish()));
+        if !self.use_flatbuffers {
+            columns.push(Arc::new(self.ts.finish()));
+            columns.push(Arc::new(self.sums_double.finish()));
+            columns.push(Arc::new(self.sums_long.finish()));
+            columns.push(Arc::new(self.count.finish()));
+        } else {
+            columns.push(Arc::new(self.binary_data.finish()));
+        }
         RecordBatch::try_new(self.schema.clone(), columns)
     }
 
@@ -85,10 +92,17 @@ impl<'a> ColumnsBuilder<'a> for Builders {
         for (_, builder) in unused {
             builder.append_null();
         }
-        Self::append_to_i64(msg.ts.as_slice(), &mut self.ts);
-        Self::append_to_f64(msg.sums_double.as_slice(), &mut self.sums_double);
-        Self::append_to_i64_opt(msg.sums_long.as_slice(), &mut self.sums_long);
-        Self::append_to_i64(msg.count.as_slice(), &mut self.count);
+
+        if !self.use_flatbuffers {
+            Self::append_to_i64(msg.ts.as_slice(), &mut self.ts);
+            Self::append_to_f64(msg.sums_double.as_slice(), &mut self.sums_double);
+            Self::append_to_i64_opt(msg.sums_long.as_slice(), &mut self.sums_long);
+            Self::append_to_i64(msg.count.as_slice(), &mut self.count);
+        } else {
+            let buf = to_flatbuffers(msg);
+            self.binary_data.append_value(buf);
+        }
+
         Ok(())
     }
 
@@ -105,13 +119,14 @@ impl<'a> ColumnsBuilder<'a> for Builders {
         self.sums_double = ListBuilder::new(Float64Builder::new());
         self.sums_long = ListBuilder::new(Int64Builder::new());
         self.count = ListBuilder::new(Int64Builder::new());
+        self.binary_data = BinaryBuilder::new();
         Ok(())
     }
 }
 
 impl Builders {
-    pub fn new(all_tags: &[String], hexify_tag_columns: bool) -> Builders {
-        let schema = ThisSchema::new(all_tags).schema;
+    pub fn new(all_tags: &[String], hexify_tag_columns: bool, use_flatbuffers: bool) -> Builders {
+        let schema = ThisSchema::new(all_tags, use_flatbuffers).schema;
         let hex_tag_fields: HashMap<String, StringBuilder> = schema
             .fields
             .iter()
@@ -120,12 +135,14 @@ impl Builders {
             .collect();
         Builders {
             hexify_tag_columns,
+            use_flatbuffers,
             schema: Arc::new(schema),
             tag_fields: hex_tag_fields,
             ts: ListBuilder::new(Int64Builder::new()),
             sums_double: ListBuilder::new(Float64Builder::new()),
             sums_long: ListBuilder::new(Int64Builder::new()),
             count: ListBuilder::new(Int64Builder::new()),
+            binary_data: BinaryBuilder::new(),
         }
     }
 

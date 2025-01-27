@@ -1,6 +1,6 @@
 [package]
 name = "parquet-playground-rs"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 
 [[bin]]
@@ -15,6 +15,7 @@ path = "src/bin/parqbench/main.rs"
 arrow = "54.0.0"
 chrono = "0.4.39"
 clap = { version = "4", features = ["derive"] }
+flatbuffers = "25"
 flate2 = "1"
 parquet = "54.0.0"
 serde = { version = "1", features = ["derive"] }
@@ -29,6 +30,8 @@ tikv-jemallocator = "0.6"
 [target.'cfg(target_env = "msvc")'.dependencies]
 snmalloc-rs = "0.3"
 
+[build-dependencies]
+flatc-rust = "0.2.0"
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,5 +1,7 @@
 use crate::errors;
-use arrow::array::{Array, ArrayBuilder, Float64Builder, Int64Builder, ListBuilder, StringBuilder};
+use arrow::array::{
+    Array, ArrayBuilder, BinaryBuilder, Float64Builder, Int64Builder, ListBuilder, StringBuilder,
+};
 use arrow::error::ArrowError;
 use parquet::column::reader::ColumnReaderImpl;
 use parquet::data_type::{ByteArrayType, DataType, DoubleType, Int64Type};
@@ -22,6 +24,12 @@ impl NullableBuilder for Float64Builder {
 }
 
 impl NullableBuilder for StringBuilder {
+    fn append_null_value(&mut self) {
+        self.append_null()
+    }
+}
+
+impl NullableBuilder for BinaryBuilder {
     fn append_null_value(&mut self) {
         self.append_null()
     }
@@ -251,6 +259,24 @@ pub fn read_string_column(
     )
 }
 
+pub fn read_binary_column(
+    typed_rdr: ColumnReaderImpl<ByteArrayType>,
+    col_desc: &ColumnDescriptor,
+    batch_size: usize,
+) -> errors::Result<Box<dyn Array>> {
+    read_column::<ByteArrayType, BinaryBuilder, _, _>(
+        typed_rdr,
+        col_desc,
+        batch_size,
+        |val, builder| {
+            let v = val.data();
+            builder.append_value(v);
+            Ok(())
+        },
+        BinaryBuilder::new,
+    )
+}
+
 pub fn read_i64_column(
     typed_rdr: ColumnReaderImpl<Int64Type>,
     col_desc: &ColumnDescriptor,
@@ -361,11 +387,12 @@ mod tests {
     use crate::errors;
     use crate::schema::parquet_metadata_to_arrow_schema;
     use crate::vec_pq_reader::{
-        decode_list_of_i64, read_f64_column, read_i64_column, read_string_column,
+        decode_list_of_i64, read_binary_column, read_f64_column, read_i64_column,
+        read_string_column,
     };
     use arrow::array::{
-        Array, ArrayRef, AsArray, Float64Builder, Int64Builder, ListBuilder, RecordBatch,
-        StringBuilder,
+        Array, ArrayRef, AsArray, BinaryBuilder, Float64Builder, Int64Builder, ListBuilder,
+        RecordBatch, StringBuilder,
     };
     use arrow::datatypes::{ArrowPrimitiveType, DataType, Field, Float64Type, Int64Type, Schema};
     use arrow::error::ArrowError;
@@ -411,6 +438,7 @@ mod tests {
         list_i64_field: ListBuilder<Int64Builder>,
         f64_field: Float64Builder,
         list_f64_field: ListBuilder<Float64Builder>,
+        binary_data_field: BinaryBuilder,
     }
 
     #[derive(Clone)]
@@ -421,6 +449,7 @@ mod tests {
         list_i64: Option<Vec<Option<i64>>>,
         f64: Option<f64>,
         list_f64: Option<Vec<Option<f64>>>,
+        binary_data: Option<Vec<u8>>,
     }
 
     impl TestBuilderRow {
@@ -431,6 +460,7 @@ mod tests {
             list_i64: Option<Vec<Option<i64>>>,
             f64: Option<f64>,
             list_f64: Option<Vec<Option<f64>>>,
+            binary_data: Option<Vec<u8>>,
         ) -> Self {
             let list_str: Option<Vec<Option<String>>> =
                 str_list.map(|v| v.iter().map(|x| x.map(|c| c.to_owned())).collect());
@@ -441,6 +471,7 @@ mod tests {
                 list_i64,
                 f64,
                 list_f64,
+                binary_data,
             }
         }
     }
@@ -466,6 +497,7 @@ mod tests {
                     DataType::List(Arc::new(Field::new_list_field(DataType::Float64, true))),
                     true,
                 ),
+                Field::new("binary_data_field", DataType::Binary, true),
             ];
             TestBuilder {
                 schema: Arc::new(Schema::new(fields)),
@@ -475,6 +507,7 @@ mod tests {
                 list_i64_field: ListBuilder::new(Int64Builder::new()),
                 f64_field: Float64Builder::new(),
                 list_f64_field: ListBuilder::new(Float64Builder::new()),
+                binary_data_field: BinaryBuilder::new(),
             }
         }
     }
@@ -494,6 +527,7 @@ mod tests {
                 Arc::new(self.list_i64_field.finish()),
                 Arc::new(self.f64_field.finish()),
                 Arc::new(self.list_f64_field.finish()),
+                Arc::new(self.binary_data_field.finish()),
             ];
             RecordBatch::try_new(self.schema.clone(), columns)
         }
@@ -507,6 +541,10 @@ mod tests {
 
             self.f64_field.append_option(msg.f64);
             self.list_f64_field.append_option(msg.list_f64.clone());
+
+            self.binary_data_field
+                .append_option(msg.binary_data.clone());
+
             Ok(())
         }
 
@@ -517,13 +555,14 @@ mod tests {
             self.list_i64_field = ListBuilder::new(Int64Builder::new());
             self.f64_field = Float64Builder::new();
             self.list_f64_field = ListBuilder::new(Float64Builder::new());
+            self.binary_data_field = BinaryBuilder::new();
             Ok(())
         }
     }
 
     fn get_rows() -> Vec<TestBuilderRow> {
         vec![
-            TestBuilderRow::new(None, None, None, None, None, None),
+            TestBuilderRow::new(None, None, None, None, None, None, None),
             TestBuilderRow::new(
                 None,
                 Some(vec![None, Some("1"), None, Some("2")]),
@@ -546,6 +585,7 @@ mod tests {
                     Some(f64::MIN),
                     None,
                 ]),
+                None,
             ),
             TestBuilderRow::new(
                 None,
@@ -554,6 +594,7 @@ mod tests {
                 Some(vec![Some(4)]),
                 Some(f64::MAX),
                 Some(vec![None, None, None, None]),
+                Some("hello".as_bytes().to_vec()),
             ),
             TestBuilderRow::new(
                 Some("hello"),
@@ -568,6 +609,7 @@ mod tests {
                     Some(456.789),
                     Some(0.0),
                 ]),
+                Some("world".as_bytes().to_vec()),
             ),
             TestBuilderRow::new(
                 Some("world"),
@@ -583,6 +625,7 @@ mod tests {
                     None,
                     Some(6.0123456),
                 ]),
+                Some([0, 1, 2, 55, 111].to_vec()),
             ),
             TestBuilderRow::new(
                 None,
@@ -598,6 +641,7 @@ mod tests {
                     Some(200.0),
                     Some(300.0),
                 ]),
+                Some([5, 5, 1, 1, 123].to_vec()),
             ),
             TestBuilderRow::new(
                 None,
@@ -606,6 +650,7 @@ mod tests {
                 Some(vec![None, Some(15)]),
                 Some(0.0),
                 Some(vec![None, None, None]),
+                Some([1, 1, 1, 1, 1, 5, 5, 5, 8, 8, 8, 9, 9].to_vec()),
             ),
             TestBuilderRow::new(
                 Some("from"),
@@ -614,6 +659,7 @@ mod tests {
                 Some(vec![Some(16), Some(17)]),
                 Some(123456789.01),
                 Some(vec![Some(0.0), Some(1.0), Some(2.0)]),
+                Some([123, 12, 1, 32, 23].to_vec()),
             ),
             TestBuilderRow::new(
                 Some("Rust"),
@@ -622,6 +668,7 @@ mod tests {
                 Some(vec![None, None, Some(19), Some(20)]),
                 Some(f64::EPSILON),
                 Some(vec![Some(f64::EPSILON), Some(f64::EPSILON), Some(f64::MIN)]),
+                Some([7, 99, 0, 111, 222, 55].to_vec()),
             ),
             TestBuilderRow::new(
                 Some("Empty"),
@@ -630,6 +677,7 @@ mod tests {
                 Some(vec![]),
                 Some(3.14),
                 Some(vec![]),
+                Some([7, 99, 0, 111, 222, 1].to_vec()),
             ),
         ]
     }
@@ -910,6 +958,43 @@ mod tests {
         )?;
         Ok(())
     }
+
+    #[test]
+    fn test_read_for_field_optional_binary() -> errors::Result<()> {
+        let values = get_rows();
+
+        let inited = init_parquet(&values.to_vec())?;
+        let rg = inited.reader.get_row_group(0)?;
+
+        let (field_index, _) = inited
+            .schema
+            .column_with_name("binary_data_field")
+            .ok_or_else(|| ArrowError::InvalidArgumentError("binary_data_field".to_string()))?;
+        let field_desc: &ColumnDescriptor = rg.metadata().column(field_index).column_descr();
+
+        // Test with different batch sizes
+        for batch_size in 1..=values.len() {
+            let col_reader = rg.get_column_reader(field_index)?;
+            let typed_reader =
+                get_typed_column_reader::<parquet::data_type::ByteArrayType>(col_reader);
+            let arr = read_binary_column(typed_reader, field_desc, batch_size)?;
+            assert!(arr.len() > 0);
+
+            let bin_arr = arr.as_binary::<i32>();
+
+            for i in 0..bin_arr.len() {
+                if bin_arr.is_null(i) {
+                    assert!(&values[i].binary_data.is_none());
+                } else {
+                    let data = bin_arr.value(i);
+                    let expected = values[i].binary_data.as_ref().unwrap().as_slice();
+                    assert_eq!(data, expected);
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn test_decode_list_of_i64() {
         let def_levels = [0, 1];

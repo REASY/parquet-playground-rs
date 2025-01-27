@@ -10,7 +10,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
 
 use arrow::array::{
-    Array, ArrowPrimitiveType, AsArray, GenericStringArray, ListArray, PrimitiveArray,
+    Array, ArrowPrimitiveType, AsArray, BinaryArray, GenericStringArray, ListArray, PrimitiveArray,
 };
 use arrow::datatypes::Int64Type;
 use arrow::datatypes::{ArrowNativeType, DataType, Float64Type};
@@ -19,8 +19,12 @@ use parquet::column::reader::get_typed_column_reader;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::{Field, Row};
 use parquet_playground_rs::errors::AppError;
+use parquet_playground_rs::flatbuffers::from_flatbuffers;
+use parquet_playground_rs::flatbuffers::histogram_flatbuffers::Histogram;
 use parquet_playground_rs::schema::parquet_metadata_to_arrow_schema;
-use parquet_playground_rs::vec_pq_reader::{read_f64_column, read_i64_column, read_string_column};
+use parquet_playground_rs::vec_pq_reader::{
+    read_binary_column, read_f64_column, read_i64_column, read_string_column,
+};
 use parquet_playground_rs::{errors, logger};
 use std::fs::File;
 use std::time::Instant;
@@ -77,6 +81,23 @@ fn touch_string_array(arr: &GenericStringArray<i32>) -> usize {
     total
 }
 
+fn touch_histogam(hist: Histogram) -> usize {
+    let mut total: usize = 0;
+    for x in hist.ts().unwrap() {
+        total += x as usize;
+    }
+    for x in hist.sums_long().unwrap() {
+        total += x as usize;
+    }
+    for x in hist.sums_double().unwrap() {
+        total += x as usize;
+    }
+    for x in hist.count().unwrap() {
+        total += x as usize;
+    }
+    total
+}
+
 fn touch_list_array(arr: &ListArray) -> usize {
     let mut total: usize = 0;
     for i in 0..arr.len() {
@@ -107,6 +128,19 @@ fn touch_array(array: &dyn Array) -> usize {
         DataType::Utf8 => {
             let arr: &GenericStringArray<i32> = array.as_string();
             total += touch_string_array(arr);
+        }
+        DataType::Binary => {
+            let arr = array.as_any().downcast_ref::<BinaryArray>().unwrap();
+            for i in 0..arr.len() {
+                if arr.is_null(i) {
+                    total += 1;
+                } else {
+                    let buf = arr.value(i);
+                    // Let's convert BYTE_ARRAY to actual FlatBuffer object and traverse it
+                    let hist: Histogram = from_flatbuffers(buf);
+                    total += touch_histogam(hist);
+                }
+            }
         }
         DataType::List(list) => {
             list.as_ref();
@@ -149,6 +183,10 @@ fn touch_row(row: &Row) -> usize {
             }
             Field::Str(str) => {
                 total += str.len();
+            }
+            Field::Bytes(bytes) => {
+                let hist = from_flatbuffers(bytes.data());
+                total += touch_histogam(hist);
             }
             Field::ListInternal(list) => {
                 for e in list.elements() {
@@ -254,9 +292,14 @@ fn read_parquet_v2(path: &str) -> Result<Vec<Box<dyn Array>>, AppError> {
                 let arr = read_f64_column(col_rdr, col_desc, BATCH_SIZE)?;
                 result.push(arr);
             }
-            DataType::Utf8 | DataType::Binary => {
+            DataType::Utf8 => {
                 let col_rdr = get_typed_column_reader::<parquet::data_type::ByteArrayType>(col_rdr);
                 let arr = read_string_column(col_rdr, col_desc, BATCH_SIZE)?;
+                result.push(arr);
+            }
+            DataType::Binary => {
+                let col_rdr = get_typed_column_reader::<parquet::data_type::ByteArrayType>(col_rdr);
+                let arr = read_binary_column(col_rdr, col_desc, BATCH_SIZE)?;
                 result.push(arr);
             }
             DataType::List(field) => match field.data_type() {

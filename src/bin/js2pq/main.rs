@@ -39,6 +39,8 @@ struct AppArgs {
     statistics_mode: StatisticsMode,
     #[clap(long, default_value_t = false)]
     hexify_tag_columns: bool,
+    #[clap(long, default_value_t = false)]
+    use_flatbuffers: bool,
 }
 
 fn main() -> errors::Result<()> {
@@ -70,7 +72,11 @@ fn main() -> errors::Result<()> {
         metric.series.len(),
         all_tags.len()
     );
-    let mut builders = Builders::new(all_tags.as_slice(), args.hexify_tag_columns);
+    let mut builders = Builders::new(
+        all_tags.as_slice(),
+        args.hexify_tag_columns,
+        args.use_flatbuffers,
+    );
     let schema = builders.schema.clone();
     for s in &metric.series {
         builders.append(s)?;
@@ -86,18 +92,26 @@ fn main() -> errors::Result<()> {
     let sums_double_col = get_list_column_path("sums_double");
     let sums_long_col = get_list_column_path("sums_long");
     let count_col = get_list_column_path("count");
-    let props = WriterProperties::builder()
+
+    let builder = WriterProperties::builder()
         .set_statistics_enabled(enabled_statistics)
-        // Not much benefit on having status on sums and count, disable it
-        .set_column_statistics_enabled(sums_double_col.clone(), EnabledStatistics::None)
-        .set_column_statistics_enabled(sums_long_col, EnabledStatistics::None)
-        .set_column_statistics_enabled(count_col, EnabledStatistics::None)
-        .set_compression(compression)
-        .set_dictionary_enabled(true)
-        // We want to use BYTE_STREAM_SPLIT for doubles
-        .set_column_encoding(sums_double_col, Encoding::BYTE_STREAM_SPLIT)
         .set_writer_version(WriterVersion::PARQUET_2_0)
-        .build();
+        .set_dictionary_enabled(true)
+        .set_compression(compression);
+    let builder = if !args.use_flatbuffers {
+        // Not much benefit on having status on sums and count, disable it
+        builder
+            .set_column_statistics_enabled(sums_double_col.clone(), EnabledStatistics::None)
+            .set_column_statistics_enabled(sums_long_col, EnabledStatistics::None)
+            .set_column_statistics_enabled(count_col, EnabledStatistics::None)
+            // We want to use BYTE_STREAM_SPLIT for doubles
+            .set_column_encoding(sums_double_col, Encoding::BYTE_STREAM_SPLIT)
+    } else {
+        builder
+            .set_column_statistics_enabled(ColumnPath::from("binary_data"), EnabledStatistics::None)
+    };
+
+    let props = builder.build();
     let wrt_opts = ArrowWriterOptions::new()
         .with_properties(props)
         .with_skip_arrow_metadata(true);

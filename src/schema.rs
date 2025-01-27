@@ -1,5 +1,5 @@
 use arrow::datatypes::{DataType, Field, Fields, Schema, TimeUnit};
-use parquet::basic::Repetition;
+use parquet::basic::{ConvertedType, Repetition};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::schema::types::{Type as ParquetType, TypePtr};
 use std::sync::Arc;
@@ -33,15 +33,23 @@ impl ThisSchema {
         Field::new("count", ThisSchema::i64_list(), true)
     }
 
-    pub fn new(all_tags: &[String]) -> ThisSchema {
+    pub fn binary_field() -> Field {
+        Field::new("binary_data", DataType::Binary, true)
+    }
+
+    pub fn new(all_tags: &[String], use_flatbuffers: bool) -> ThisSchema {
         let mut all_fields: Vec<Field> = all_tags
             .iter()
             .map(|t| Field::new(t.to_owned(), DataType::Utf8, true))
             .collect();
-        all_fields.push(Self::ts_field());
-        all_fields.push(Self::sums_double_field());
-        all_fields.push(Self::sums_long_field());
-        all_fields.push(Self::count_field());
+        if !use_flatbuffers {
+            all_fields.push(Self::ts_field());
+            all_fields.push(Self::sums_double_field());
+            all_fields.push(Self::sums_long_field());
+            all_fields.push(Self::count_field());
+        } else {
+            all_fields.push(Self::binary_field());
+        }
         let schema = Schema::new(all_fields);
         ThisSchema { schema }
     }
@@ -80,7 +88,13 @@ fn convert_parquet_type_to_arrow_type(field: &ParquetType) -> DataType {
             parquet::basic::Type::INT96 => DataType::Timestamp(TimeUnit::Nanosecond, None),
             parquet::basic::Type::FLOAT => DataType::Float32,
             parquet::basic::Type::DOUBLE => DataType::Float64,
-            parquet::basic::Type::BYTE_ARRAY => DataType::Binary,
+            parquet::basic::Type::BYTE_ARRAY => {
+                if field.get_basic_info().converted_type() == ConvertedType::UTF8 {
+                    DataType::Utf8
+                } else {
+                    DataType::Binary
+                }
+            }
             parquet::basic::Type::FIXED_LEN_BYTE_ARRAY => DataType::FixedSizeBinary(*type_length),
         },
         ParquetType::GroupType { fields, .. } => {
