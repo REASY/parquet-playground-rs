@@ -1,6 +1,6 @@
 [package]
 name = "parquet-playground-rs"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 
 [[bin]]
@@ -12,12 +12,12 @@ name = "parqbench"
 path = "src/bin/parqbench/main.rs"
 
 [dependencies]
-arrow = "54.0.0"
+arrow = "54.1.0"
 chrono = "0.4.39"
 clap = { version = "4", features = ["derive"] }
 flatbuffers = "25"
 flate2 = "1"
-parquet = "54.0.0"
+parquet = "54.1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1"}
 thiserror = "2"
