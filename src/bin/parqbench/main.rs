@@ -277,7 +277,7 @@ fn read_parquet_v2(path: &str) -> Result<Vec<Box<dyn Array>>, AppError> {
     let rg = reader.get_row_group(0)?;
 
     let mut result: Vec<Box<dyn Array>> = Vec::new();
-    const BATCH_SIZE: usize = 1000;
+    const BATCH_SIZE: usize = 10000;
     for (col_idx, c) in schema.fields.iter().enumerate() {
         let col_rdr = rg.get_column_reader(col_idx)?;
         let col_desc = rg.metadata().column(col_idx).column_descr();
