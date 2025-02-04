@@ -234,16 +234,20 @@ fn main() -> errors::Result<()> {
                 }
             }
             ParquetReaderType::Columnar => {
-                let arrays = read_parquet_v2(args.input_parquet_file_path.as_str())?;
+                let row_group_arrays = read_parquet_v2(args.input_parquet_file_path.as_str())?;
                 if args.use_data {
-                    for array in &arrays {
-                        counter += touch_array(array.as_ref());
+                    for row_group in &row_group_arrays {
+                        for array in row_group {
+                            counter += touch_array(array.as_ref());
+                        }
                     }
                 } else {
                     // The first column is not a List, so we use it to calculate the total number of rows
-                    arrays.first().iter().for_each(|arr| {
-                        counter += arr.len();
-                    });
+                    for row_group in &row_group_arrays {
+                        for array in row_group {
+                            counter += array.len();
+                        }
+                    }
                 }
             }
         };
@@ -269,55 +273,61 @@ fn read_parquet(path: &str) -> Result<Vec<Row>, AppError> {
     Ok(xs)
 }
 
-fn read_parquet_v2(path: &str) -> Result<Vec<Box<dyn Array>>, AppError> {
+fn read_parquet_v2(path: &str) -> Result<Vec<Vec<Box<dyn Array>>>, AppError> {
     let f = File::open(path)?;
     let reader = SerializedFileReader::new(f)?;
-
+    let mut result: Vec<Vec<Box<dyn Array>>> = Vec::new();
     let schema = parquet_metadata_to_arrow_schema(reader.metadata());
-    let rg = reader.get_row_group(0)?;
-
-    let mut result: Vec<Box<dyn Array>> = Vec::new();
-    const BATCH_SIZE: usize = 10000;
-    for (col_idx, c) in schema.fields.iter().enumerate() {
-        let col_rdr = rg.get_column_reader(col_idx)?;
-        let col_desc = rg.metadata().column(col_idx).column_descr();
-        match c.data_type() {
-            DataType::Int64 => {
-                let col_rdr = get_typed_column_reader::<parquet::data_type::Int64Type>(col_rdr);
-                let arr = read_i64_column(col_rdr, col_desc, BATCH_SIZE)?;
-                result.push(arr);
-            }
-            DataType::Float64 => {
-                let col_rdr = get_typed_column_reader::<parquet::data_type::DoubleType>(col_rdr);
-                let arr = read_f64_column(col_rdr, col_desc, BATCH_SIZE)?;
-                result.push(arr);
-            }
-            DataType::Utf8 => {
-                let col_rdr = get_typed_column_reader::<parquet::data_type::ByteArrayType>(col_rdr);
-                let arr = read_string_column(col_rdr, col_desc, BATCH_SIZE)?;
-                result.push(arr);
-            }
-            DataType::Binary => {
-                let col_rdr = get_typed_column_reader::<parquet::data_type::ByteArrayType>(col_rdr);
-                let arr = read_binary_column(col_rdr, col_desc, BATCH_SIZE)?;
-                result.push(arr);
-            }
-            DataType::List(field) => match field.data_type() {
+    for row_group in 0..reader.num_row_groups() {
+        let rg = reader.get_row_group(row_group)?;
+        const BATCH_SIZE: usize = 10000;
+        let mut row_group_result: Vec<Box<dyn Array>> = Vec::new();
+        for (col_idx, c) in schema.fields.iter().enumerate() {
+            let col_rdr = rg.get_column_reader(col_idx)?;
+            let col_desc = rg.metadata().column(col_idx).column_descr();
+            match c.data_type() {
                 DataType::Int64 => {
                     let col_rdr = get_typed_column_reader::<parquet::data_type::Int64Type>(col_rdr);
                     let arr = read_i64_column(col_rdr, col_desc, BATCH_SIZE)?;
-                    result.push(arr);
+                    row_group_result.push(arr);
                 }
                 DataType::Float64 => {
                     let col_rdr =
                         get_typed_column_reader::<parquet::data_type::DoubleType>(col_rdr);
                     let arr = read_f64_column(col_rdr, col_desc, BATCH_SIZE)?;
-                    result.push(arr);
+                    row_group_result.push(arr);
                 }
+                DataType::Utf8 => {
+                    let col_rdr =
+                        get_typed_column_reader::<parquet::data_type::ByteArrayType>(col_rdr);
+                    let arr = read_string_column(col_rdr, col_desc, BATCH_SIZE)?;
+                    row_group_result.push(arr);
+                }
+                DataType::Binary => {
+                    let col_rdr =
+                        get_typed_column_reader::<parquet::data_type::ByteArrayType>(col_rdr);
+                    let arr = read_binary_column(col_rdr, col_desc, BATCH_SIZE)?;
+                    row_group_result.push(arr);
+                }
+                DataType::List(field) => match field.data_type() {
+                    DataType::Int64 => {
+                        let col_rdr =
+                            get_typed_column_reader::<parquet::data_type::Int64Type>(col_rdr);
+                        let arr = read_i64_column(col_rdr, col_desc, BATCH_SIZE)?;
+                        row_group_result.push(arr);
+                    }
+                    DataType::Float64 => {
+                        let col_rdr =
+                            get_typed_column_reader::<parquet::data_type::DoubleType>(col_rdr);
+                        let arr = read_f64_column(col_rdr, col_desc, BATCH_SIZE)?;
+                        row_group_result.push(arr);
+                    }
+                    x => panic!("{:?}", x),
+                },
                 x => panic!("{:?}", x),
-            },
-            x => panic!("{:?}", x),
+            }
         }
+        result.push(row_group_result);
     }
     Ok(result)
 }
